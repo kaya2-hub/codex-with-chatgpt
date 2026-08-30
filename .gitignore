@@ -4,6 +4,7 @@ dist/
 .pnpm-store/
 *.log
 .DS_Store
+desktop.ini
 .env
 .env.*
 !.env.example

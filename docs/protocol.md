@@ -130,11 +130,22 @@ NEEDS:
 
 ### HANDOFF (coding agent → new ChatGPT conversation)
 
-One workspace keeps one long-lived C2C conversation (`c2c session get/set`).
-The coding agent switches to a new chat only when the user asks for it or the
-old chat has grown long enough to lag. Right after the boot prompt, it sends
-a HANDOFF so the new chat can continue seamlessly — a brief, never a data
-dump (the new chat re-reads code via MCP):
+`c2c session --json` → `conversation.mode` chooses how chats are grouped.
+
+- **long-chat:** one long-lived C2C conversation per workspace. Codex opens a
+  replacement chat only when the user asks, the old chat lags, or the chat was
+  lost.
+- **project:** one ChatGPT Project (collection) per workspace. A new Codex
+  conversation starts a new chat **inside that Project**. The same Codex
+  conversation keeps using its saved chat URL.
+
+Right after the boot prompt, Codex sends a HANDOFF so the new chat can
+continue — a brief, never a data dump (the new chat re-reads code via MCP).
+Project instructions and project-only memory hold durable workspace identity.
+HANDOFF still wins for the current task:
+
+Trust order: connector (current code) > HANDOFF (this task) > Project
+instructions > Project memory.
 
 ```
 [C2C]
@@ -206,6 +217,44 @@ Rules:
 13. If you receive a HANDOFF message, this conversation continues an
     existing task. Trust the handoff brief for history, re-read any code
     you need through MCP, and resume from NEXT_EXPECTED_STEP.
+13. If this chat sits in a ChatGPT Project, use only the connector named
+    in that Project's instructions. Do not use another workspace's connector.
+```
+
+## Project instructions
+
+New workspaces store durable identity in the ChatGPT Project settings
+(指令), not in every boot prompt. The Skill fills this template once.
+Never put a public or temporary URL in the instructions — only the
+connector **name**.
+
+```
+You are the planning and review layer for one local workspace. Codex executes.
+
+This Project is bound only to:
+- Workspace name: {{workspace_name}}
+- Kind: {{project_type}} ({{languages}} / {{frameworks}})
+- Connector (use this one only): {{connector_name}}
+
+When you call tools, use ONLY that connector. Do not use any other
+Codex with ChatGPT connector. If workspace_info names a different
+workspace, stop. Do not plan. Do not use this Project's memory.
+
+Read code, git, and diffs through that connector. Never ask anyone to
+paste file bodies, diffs, or logs. Never upload the repo into this
+Project's files or sources.
+
+When facts conflict, trust this order:
+1. Current code from the connector
+2. A HANDOFF in this chat (this task's goal, progress, next step)
+3. These instructions
+4. This Project's memory (durable architecture only; stale memory loses)
+
+This Project's memory is only for this workspace. On HANDOFF, trust the
+brief, re-read code through the connector, and resume at NEXT_EXPECTED_STEP.
+
+Be substantive: why, which file, what to test. No empty one-liners and
+no 40-step epics. Use C2C control messages.
 ```
 
 See `docs/ai-context.md` for the full AI_CONTEXT.md spec (template, who

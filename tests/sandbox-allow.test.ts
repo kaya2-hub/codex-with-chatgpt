@@ -5,6 +5,7 @@ import {
   ensureSandboxAllowlist,
   isStateDirAllowlisted,
   pathsEquivalent,
+  shouldAutoSandboxAllow,
   toTomlPath,
   upsertWritableRoot,
 } from "../src/config/sandbox-allow.js";
@@ -96,5 +97,16 @@ describe("sandbox allowlist", () => {
     const text = fs.readFileSync(configPath, "utf8");
     expect(text.match(/writable_roots/g)?.length).toBe(1);
     cleanup(dir);
+  });
+});
+
+describe("shouldAutoSandboxAllow", () => {
+  it("skips only for Claude Code", () => {
+    expect(shouldAutoSandboxAllow("claude-code")).toBe(false);
+  });
+
+  it("attempts it for Codex and for unspecified (legacy) callers", () => {
+    expect(shouldAutoSandboxAllow("codex")).toBe(true);
+    expect(shouldAutoSandboxAllow(undefined)).toBe(true);
   });
 });

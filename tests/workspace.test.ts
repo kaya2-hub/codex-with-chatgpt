@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { Workspace, WorkspaceError } from "../src/workspace/manager.js";
+import { Workspace, WorkspaceError, resolveChatGptPolicy } from "../src/workspace/manager.js";
 import { makeTmpDir, cleanup, write } from "./helpers.js";
 
 let root: string;
@@ -171,5 +171,41 @@ describe("workspace identity", () => {
     expect(namedWs.name).toBe("Remi");
     expect(namedWs.projectConfig.maxIterations).toBe(12);
     cleanup(named);
+  });
+});
+
+describe("chatgpt-surface policy", () => {
+  it("defaults to chat + auto-reject when .c2c.json has no overrides", () => {
+    expect(resolveChatGptPolicy({})).toEqual({ chatgptSurface: "chat", rejectWorkSuggestion: true });
+    expect(ws.chatgptPolicy).toEqual({ chatgptSurface: "chat", rejectWorkSuggestion: true });
+  });
+
+  it("honors explicit overrides in .c2c.json", () => {
+    const dir = makeTmpDir("policy");
+    write(dir, ".c2c.json", JSON.stringify({ chatgptSurface: "work", rejectWorkSuggestion: false }));
+    const policyWs = new Workspace(dir);
+    expect(policyWs.chatgptPolicy).toEqual({ chatgptSurface: "work", rejectWorkSuggestion: false });
+    cleanup(dir);
+  });
+
+  it("falls back to defaults for garbage values instead of throwing", () => {
+    expect(
+      resolveChatGptPolicy({ chatgptSurface: "nonsense" as never, rejectWorkSuggestion: "yes" as unknown as boolean })
+    ).toEqual({ chatgptSurface: "chat", rejectWorkSuggestion: true });
+  });
+});
+
+describe("AI_CONTEXT.md bootstrap", () => {
+  it("reports absence when the workspace has no AI_CONTEXT.md", () => {
+    expect(ws.aiContextInfo()).toEqual({ exists: false, path: "AI_CONTEXT.md" });
+  });
+
+  it("reports presence once AI_CONTEXT.md is created, live (not cached at construction)", () => {
+    const dir = makeTmpDir("ai-context");
+    const liveWs = new Workspace(dir);
+    expect(liveWs.aiContextInfo().exists).toBe(false);
+    write(dir, "AI_CONTEXT.md", "# Project Context\n");
+    expect(liveWs.aiContextInfo()).toEqual({ exists: true, path: "AI_CONTEXT.md" });
+    cleanup(dir);
   });
 });

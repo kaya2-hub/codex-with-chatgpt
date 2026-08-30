@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import fs from "node:fs";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -76,12 +77,30 @@ describe("MCP tools over Streamable HTTP", () => {
 
   it("workspace_info returns identity and project detection", async () => {
     const result = await client.callTool({ name: "workspace_info", arguments: {} });
-    const info = jsonOf<{ workspaceId: string; projectType: string; frameworks: string[]; git: { isRepo: boolean; branch: string } }>(result);
+    const info = jsonOf<{
+      workspaceId: string;
+      projectType: string;
+      frameworks: string[];
+      git: { isRepo: boolean; branch: string };
+      aiContext: { exists: boolean; path: string };
+    }>(result);
     expect(info.workspaceId).toBe(bridge.workspace.id);
     expect(info.projectType).toBe("node");
     expect(info.frameworks).toContain("React");
     expect(info.git.isRepo).toBe(true);
     expect(info.git.branch).toBe("main");
+    expect(info.aiContext).toEqual({ exists: false, path: "AI_CONTEXT.md" });
+  });
+
+  it("workspace_info reports aiContext.exists once AI_CONTEXT.md is created", async () => {
+    write(root, "AI_CONTEXT.md", "# Project Context\n");
+    try {
+      const result = await client.callTool({ name: "workspace_info", arguments: {} });
+      const info = jsonOf<{ aiContext: { exists: boolean; path: string } }>(result);
+      expect(info.aiContext).toEqual({ exists: true, path: "AI_CONTEXT.md" });
+    } finally {
+      fs.rmSync(path.join(root, "AI_CONTEXT.md"), { force: true });
+    }
   });
 
   it("read_file returns hello.txt", async () => {

@@ -13,6 +13,21 @@ export interface SandboxAllowResult {
   configPath: string;
 }
 
+export type CodingAgent = "codex" | "claude-code";
+
+/**
+ * Whether c2c should attempt to write the Codex sandbox allowlist automatically.
+ * Codex needs this so later chats can write `~/.codex/config.toml` without
+ * elevation. Claude Code has its own permission-prompt model and must never
+ * gain an unrequested `~/.codex` directory just because `c2c setup`/`doctor`
+ * ran for a Claude Code session. When the caller does not identify itself
+ * (legacy Skill, manual CLI use), behavior is unchanged from before
+ * multi-agent support: always attempt it.
+ */
+export function shouldAutoSandboxAllow(agent?: CodingAgent): boolean {
+  return agent !== "claude-code";
+}
+
 export function getCodexHome(): string {
   const fromEnv = process.env.CODEX_HOME?.trim();
   if (fromEnv) return path.resolve(fromEnv);
@@ -26,6 +41,7 @@ export function getCodexConfigPath(): string {
 /** POSIX slashes are valid in TOML and accepted by Codex on Windows. */
 export function toTomlPath(p: string): string {
   if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\")) return p.replace(/\\/g, "/");
+  if (p.startsWith("/")) return p;
   return path.resolve(p).replace(/\\/g, "/");
 }
 

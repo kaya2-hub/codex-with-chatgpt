@@ -6,11 +6,11 @@
              │  Reason / Plan / Review   │
              └──────────┬──────────▲─────┘
                         │          │
-               MCP      │          │ Computer Use
+               MCP      │          │ Browser automation
             Data Plane  │          │ Control Plane
                         ▼          │
              ┌─────────────────────┐
-             │      C2C Bridge     │
+             │      C2C Bridge     │   ← agent-agnostic (this file's src/)
              │  MCP Server (RO)    │
              │  OAuth AS + PRM     │
              │  Pairing Manager    │
@@ -24,17 +24,35 @@
              └──────────▲──────────┘
                         │ edit / shell / git / test
              ┌──────────┴──────────┐
-             │  Codex Harness      │
+             │  Coding-agent Skill │   ← agent-specific (skill/, skill-claude-code/)
+             │  ┌────────┬───────┐ │
+             │  │ Codex  │ Claude │ │
+             │  │        │  Code  │ │
+             │  └────────┴───────┘ │
              └─────────────────────┘
 ```
 
 ## Principles
 
-- **ChatGPT thinks. Codex works.** The bridge never re-implements a coding harness.
-- **Computer Use = control plane**: tiny `[C2C]` state messages (< 1 KB).
+- **ChatGPT thinks. The coding agent works.** The bridge never re-implements
+  a coding harness, and never picks a side between Codex and Claude Code.
+- **Computer Use = control plane**: tiny `[C2C]` state messages (< 1 KB),
+  driven by whichever coding agent's own browser-automation capability is
+  in use (Codex's built-in browser control, or an MCP browser tool under
+  Claude Code — see `skill-claude-code/SKILL.md`).
 - **MCP = data plane**: ChatGPT pulls files/diffs/search results itself.
 - **Read-only by design**: no write/exec tools exist in V1 at all.
-- **Workspace is the security boundary**: one bridge = one workspace = one token audience.
+- **Workspace is the security boundary**: one bridge = one workspace = one
+  token audience, shared by any coding agent that connects to it (see
+  `docs/chatgpt-interaction-policy.md` for the one piece of behavior —
+  ChatGPT surface control — that is specified once and applied identically
+  by every agent adapter).
+- **Common vs. agent-specific**: everything under `src/` (Bridge, MCP tools,
+  OAuth, pairing, tunnel, workspace containment) is shared and knows nothing
+  about which coding agent is connected. Only `skill/` (Codex) and
+  `skill-claude-code/` (Claude Code) — plus the one Codex-only local
+  integration, the sandbox allowlist in `src/config/sandbox-allow.ts`,
+  invoked only when `--agent codex` — differ per agent.
 
 ## Components (src/)
 

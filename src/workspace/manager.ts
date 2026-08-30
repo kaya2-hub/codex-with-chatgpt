@@ -55,14 +55,49 @@ export interface ListDirectoryResult {
   hasMore: boolean;
 }
 
+export type ChatGptSurface = "chat" | "work";
+
+export interface ChatGptPolicy {
+  /** Which ChatGPT surface the connected coding agent should keep the conversation on. */
+  chatgptSurface: ChatGptSurface;
+  /** Auto-dismiss ChatGPT "Work" switch suggestions instead of surfacing them to the user. */
+  rejectWorkSuggestion: boolean;
+}
+
 export interface ProjectConfig {
   name?: string;
   maxIterations?: number;
+  chatgptSurface?: ChatGptSurface;
+  rejectWorkSuggestion?: boolean;
+}
+
+/** Defaults per spec: stay on normal Chat, auto-dismiss Work suggestions. */
+export const DEFAULT_CHATGPT_POLICY: ChatGptPolicy = {
+  chatgptSurface: "chat",
+  rejectWorkSuggestion: true,
+};
+
+/**
+ * Resolve the effective ChatGPT-surface policy for a workspace, merging
+ * `.c2c.json` overrides onto the defaults. Shared by every coding-agent
+ * adapter (Codex, Claude Code, ...) so the behavior is identical regardless
+ * of which agent is driving the browser. See docs/chatgpt-interaction-policy.md.
+ */
+export function resolveChatGptPolicy(config: ProjectConfig): ChatGptPolicy {
+  const surface: ChatGptSurface = config.chatgptSurface === "work" ? "work" : DEFAULT_CHATGPT_POLICY.chatgptSurface;
+  const rejectWorkSuggestion =
+    typeof config.rejectWorkSuggestion === "boolean"
+      ? config.rejectWorkSuggestion
+      : DEFAULT_CHATGPT_POLICY.rejectWorkSuggestion;
+  return { chatgptSurface: surface, rejectWorkSuggestion };
 }
 
 const DEFAULT_MAX_LINES = 400;
 const HARD_MAX_LINES = 2000;
 const DEFAULT_MAX_BYTES = 256 * 1024;
+
+/** Project-bootstrap entry point filename, workspace-root-relative. See docs/ai-context.md. */
+export const AI_CONTEXT_FILENAME = "AI_CONTEXT.md";
 
 export class Workspace {
   readonly root: string;
@@ -70,6 +105,8 @@ export class Workspace {
   readonly name: string;
   readonly ignoreRules: IgnoreRules;
   readonly projectConfig: ProjectConfig;
+  /** Effective ChatGPT-surface policy for this workspace (defaults + `.c2c.json` overrides). */
+  readonly chatgptPolicy: ChatGptPolicy;
 
   constructor(rootInput: string) {
     const resolved = path.resolve(rootInput);
@@ -87,6 +124,7 @@ export class Workspace {
     this.ignoreRules = new IgnoreRules(real);
     this.projectConfig = readJsonIfExists<ProjectConfig>(path.join(real, ".c2c.json")) ?? {};
     this.name = this.projectConfig.name ?? path.basename(real);
+    this.chatgptPolicy = resolveChatGptPolicy(this.projectConfig);
   }
 
   private contains(candidate: string): boolean {
@@ -359,5 +397,15 @@ export class Workspace {
       packageManager,
       scripts,
     };
+  }
+
+  /**
+   * Cheap existence check for the project-bootstrap entry point (see
+   * docs/ai-context.md). Existence only — content is read normally through
+   * `read_file` like any other workspace file, subject to the same
+   * sensitive-file and size rules.
+   */
+  aiContextInfo(): { exists: boolean; path: string } {
+    return { exists: fs.existsSync(path.join(this.root, AI_CONTEXT_FILENAME)), path: AI_CONTEXT_FILENAME };
   }
 }

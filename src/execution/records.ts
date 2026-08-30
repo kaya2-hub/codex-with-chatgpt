@@ -3,8 +3,8 @@ import path from "node:path";
 import { ensureDir, getStateDir } from "../config/paths.js";
 
 /**
- * Lightweight execution records written by the Codex harness after each
- * iteration (via `c2c record`). ChatGPT reads them through the
+ * Lightweight execution records written by the coding agent (Codex or
+ * Claude Code) after each iteration (via `c2c record`). ChatGPT reads them through the
  * `execution_summary` and `test_status` MCP tools.
  */
 export interface ExecutionRecord {

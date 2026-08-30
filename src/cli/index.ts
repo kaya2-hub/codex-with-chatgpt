@@ -27,7 +27,13 @@ import {
 } from "../tunnel/state.js";
 import { Logger } from "../logger/index.js";
 import { getStateDir } from "../config/paths.js";
-import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
+import {
+  ensureSandboxAllowlist,
+  getCodexConfigPath,
+  isStateDirAllowlisted,
+  shouldAutoSandboxAllow,
+  type CodingAgent,
+} from "../config/sandbox-allow.js";
 import {
   CHATGPT_CREATE_CONNECTOR_URL,
   CHATGPT_DEVELOPER_MODE_URL,
@@ -98,9 +104,18 @@ function tunnelChoicePayload(workspace: Workspace, zoneHint?: string): Record<st
   };
 }
 
-function trySandboxAllow():
-  | { ok: true; added: boolean; alreadyAllowed: boolean; stateDir: string; configPath: string }
+function parseAgent(value?: string): CodingAgent | undefined {
+  if (!value) return undefined;
+  if (value === "codex" || value === "claude-code") return value;
+  throw new Error(`Invalid --agent value: ${value} (expected "codex" or "claude-code")`);
+}
+
+function trySandboxAllow(agent?: CodingAgent):
+  | { ok: true; added: boolean; alreadyAllowed: boolean; stateDir: string; configPath: string; skipped?: boolean }
   | { ok: false; added: false; alreadyAllowed: false; error: string } {
+  if (!shouldAutoSandboxAllow(agent)) {
+    return { ok: true, added: false, alreadyAllowed: false, stateDir: getStateDir(), configPath: getCodexConfigPath(), skipped: true };
+  }
   try {
     const result = ensureSandboxAllowlist();
     return { ok: true, ...result };
@@ -157,7 +172,7 @@ async function ensureBridgeAndTunnel(
 
 program
   .name("c2c")
-  .description(`${PRODUCT_NAME} — ChatGPT thinks. Codex works.`)
+  .description(`${PRODUCT_NAME} — ChatGPT thinks. Codex / Claude Code works.`)
   .version(VERSION, "-v, --version")
   .configureHelp({ sortSubcommands: true });
 
@@ -222,18 +237,20 @@ program
   .command("setup")
   .description("First-time setup: bridge + secure connection + pairing code")
   .option("-w, --workspace <path>")
+  .option("--agent <agent>", "calling coding agent: codex | claude-code")
   .option("--no-tunnel", "local-only setup (development)")
   .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; tunnel: boolean; json: boolean }) => {
+  .action(async (opts: { workspace?: string; agent?: string; tunnel: boolean; json: boolean }) => {
     const root = resolveWorkspace(opts.workspace);
     try {
+      const agent = parseAgent(opts.agent);
       if (!opts.json) {
         say(PRODUCT_NAME);
         say("");
         say("正在连接 ChatGPT…");
         say("");
       }
-      const sandbox = trySandboxAllow();
+      const sandbox = trySandboxAllow(agent);
       const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
       const connectorName = mcpUrl
         ? persistWorkspaceEndpoint({
@@ -280,7 +297,7 @@ program
       say(`配对码：${pairingResult.code}（${Math.round((pairingResult.expiresAt - Date.now()) / 60000)} 分钟内有效）`);
       say("");
       say("下一步：在 ChatGPT 的连接器设置中添加以上地址（OAuth），并在授权页输入配对码。");
-      say("如果你在使用 Codex Skill，这一步会自动完成。");
+      say("如果你在使用 Codex 或 Claude Code 的 Skill，这一步会自动完成。");
     } catch (error) {
       handleCliError(error, opts.json);
     }
@@ -352,10 +369,12 @@ program
   .command("doctor")
   .description("Diagnose and auto-repair the connection")
   .option("-w, --workspace <path>")
+  .option("--agent <agent>", "calling coding agent: codex | claude-code")
   .option("--no-fix", "diagnose only, do not repair")
   .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; fix: boolean; json: boolean }) => {
+  .action(async (opts: { workspace?: string; agent?: string; fix: boolean; json: boolean }) => {
     const root = resolveWorkspace(opts.workspace);
+    const agent = parseAgent(opts.agent);
     const report: Record<string, { ok: boolean; detail?: string }> = {};
     const results: string[] = [];
 
@@ -363,9 +382,12 @@ program
     const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
     report.node = { ok: nodeMajor >= 20, detail: `v${process.versions.node}` };
 
-    // Codex sandbox writable_roots (so later chats do not need elevation)
-    if (opts.fix) {
-      const sandbox = trySandboxAllow();
+    // Codex sandbox writable_roots (so later chats do not need elevation).
+    // Claude Code has its own permission-prompt model and does not use this at all.
+    if (!shouldAutoSandboxAllow(agent)) {
+      report.sandbox = { ok: true, detail: "不适用（Claude Code 使用自身权限模型）" };
+    } else if (opts.fix) {
+      const sandbox = trySandboxAllow(agent);
       if (sandbox.ok) {
         report.sandbox = { ok: true, detail: sandbox.alreadyAllowed ? "已在白名单" : "已写入白名单" };
         if (sandbox.added) results.push("已将本地设置目录加入 Codex 沙箱白名单");
@@ -709,6 +731,27 @@ program
     }
   });
 
+// ---------------------------------------------------------------- chatgpt-policy (shared ChatGPT-surface policy)
+
+program
+  .command("chatgpt-policy")
+  .description(
+    "Resolved ChatGPT-surface policy for this workspace (chatgptSurface / rejectWorkSuggestion). " +
+      "Shared by every coding-agent Skill — see docs/chatgpt-interaction-policy.md."
+  )
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; json: boolean }) => {
+    const workspace = new Workspace(resolveWorkspace(opts.workspace));
+    const policy = workspace.chatgptPolicy;
+    if (opts.json) {
+      say(JSON.stringify({ ok: true, ...policy }));
+      return;
+    }
+    say(`chatgptSurface: ${policy.chatgptSurface}`);
+    say(`rejectWorkSuggestion: ${policy.rejectWorkSuggestion}`);
+  });
+
 // ---------------------------------------------------------------- sandbox-allow (Codex writable_roots, macOS + Windows)
 
 program
@@ -868,7 +911,7 @@ session
 
 program
   .command("record", { hidden: true })
-  .description("Record a Codex execution summary (used by the Skill)")
+  .description("Record a coding-agent execution summary (used by the Codex / Claude Code Skill)")
   .option("-w, --workspace <path>")
   .requiredOption("--task <id>")
   .requiredOption("--iteration <n>")

@@ -13,22 +13,26 @@ INIT → PLAN → EXECUTING → EXECUTED → REVIEW → PLAN | DONE | BLOCKED | 
 
 | State | Sender | Meaning |
 | --- | --- | --- |
-| INIT | Codex | New task; asks ChatGPT to inspect + plan |
+| INIT | coding agent | New task; asks ChatGPT to inspect + plan |
 | PLAN | ChatGPT | Executable plan for the next iteration |
-| EXECUTING | Codex | (optional) execution in progress |
-| EXECUTED | Codex | Iteration finished; metadata only |
+| EXECUTING | coding agent | (optional) execution in progress |
+| EXECUTED | coding agent | Iteration finished; metadata only |
 | REVIEW | ChatGPT | (implicit) ChatGPT is inspecting via MCP |
 | DONE | ChatGPT | Success criteria met |
 | BLOCKED | ChatGPT | Cannot proceed; contains reason |
 | ERROR | either | Protocol/infrastructure failure |
-| HANDOFF | Codex | Continuation brief sent to a replacement conversation |
+| HANDOFF | coding agent | Continuation brief sent to a replacement conversation |
+
+"Coding agent" is Codex or Claude Code — the protocol and every message
+shape below are identical either way; only the Skill driving the browser
+differs (`skill/SKILL.md` vs `skill-claude-code/SKILL.md`).
 
 ## Message format
 
 Every control message starts with `[C2C]` and key-value headers, then sections.
 Keep messages < 1 KB. No diffs, no logs, no file bodies.
 
-### INIT (Codex → ChatGPT)
+### INIT (coding agent → ChatGPT)
 
 ```
 [C2C]
@@ -40,11 +44,11 @@ GOAL:
 Implement dark mode.
 
 INSTRUCTION:
-Inspect the connected workspace through Codex with ChatGPT MCP.
-Create an implementation plan for Codex.
+Inspect the connected workspace through the Codex with ChatGPT MCP connector.
+Create an implementation plan for the coding agent.
 ```
 
-### PLAN (ChatGPT → Codex)
+### PLAN (ChatGPT → coding agent)
 
 ```
 [C2C]
@@ -75,7 +79,7 @@ SUCCESS_CRITERIA:
 
 Plans must be finite, concrete, executable. Not 40-step epics.
 
-### EXECUTED (Codex → ChatGPT)
+### EXECUTED (coding agent → ChatGPT)
 
 ```
 [C2C]
@@ -95,11 +99,11 @@ TESTS:
 Please independently inspect the workspace and current git diff through MCP.
 ```
 
-Before sending EXECUTED, Codex records the iteration:
+Before sending EXECUTED, the coding agent records the iteration:
 `c2c record --task c2c_f81a --iteration 1 --changed-files ... --tests ... --exit-status ok`
 so ChatGPT can read it via the `execution_summary` / `test_status` tools.
 
-### DONE / BLOCKED (ChatGPT → Codex)
+### DONE / BLOCKED (ChatGPT → coding agent)
 
 ```
 [C2C]
@@ -124,13 +128,13 @@ NEEDS:
 ...
 ```
 
-### HANDOFF (Codex → new ChatGPT conversation)
+### HANDOFF (coding agent → new ChatGPT conversation)
 
 One workspace keeps one long-lived C2C conversation (`c2c session get/set`).
-Codex switches to a new chat only when the user asks for it or the old chat has
-grown long enough to lag. Right after the boot prompt, Codex sends a HANDOFF so
-the new chat can continue seamlessly — a brief, never a data dump (the new chat
-re-reads code via MCP):
+The coding agent switches to a new chat only when the user asks for it or the
+old chat has grown long enough to lag. Right after the boot prompt, it sends
+a HANDOFF so the new chat can continue seamlessly — a brief, never a data
+dump (the new chat re-reads code via MCP):
 
 ```
 [C2C]
@@ -157,17 +161,19 @@ Independently review iteration 4 via git_diff and reply PLAN or DONE.
 
 ## Loop limits
 
-`maxIterations` (default 12, configurable in `.c2c.json`). When reached, Codex
-pauses and asks the user whether to continue.
+`maxIterations` (default 12, configurable in `.c2c.json`). When reached, the
+coding agent pauses and asks the user whether to continue.
 
 ## Boot Prompt
 
 Send once at the start of every new C2C conversation:
 
 ```
-You are the planning and review layer of a Codex coding session.
+You are the planning and review layer of a coding session. The executing
+agent on the other end may be Codex or Claude Code — the protocol is the
+same either way.
 
-Codex owns execution.
+The coding agent owns execution.
 You own high-level reasoning, planning and review.
 
 You have access to the current local workspace through the
@@ -175,22 +181,32 @@ You have access to the current local workspace through the
 
 Rules:
 
-1. Do not ask Codex to paste files that are available through MCP.
-2. Inspect only the files needed for the task.
-3. Use MCP to inspect current code, git status and diff.
-4. Produce concise executable plans.
-5. Codex will execute your plan using its own harness.
-6. After Codex reports EXECUTED, independently inspect the diff.
-7. Do not assume an implementation succeeded just because Codex says so.
-8. Continue until the implementation satisfies the success criteria.
-9. Avoid unnecessary rewrites.
-10. Return C2C structured control messages.
-11. Be substantive. PLAN and review replies must carry enough signal for
-    Codex to act on: rationale, per-file natural-language suggestions
+1. Do not ask the coding agent to paste files that are available through MCP.
+2. Before producing any PLAN (this one and every later one in this
+   conversation): call workspace_info first. If its aiContext.exists is
+   true, read AI_CONTEXT.md next via read_file, then only the current
+   authoritative docs it points to — this is how you get oriented without
+   reading the whole repository. Treat AI_CONTEXT.md as a pointer to verify
+   against real code/git state, not as ground truth to trust blindly; if it
+   looks stale, say so rather than silently acting on it.
+3. Beyond that, inspect only the files actually needed for the task.
+4. Use MCP to inspect current code, git status and diff.
+5. Produce concise executable plans.
+6. The coding agent will execute your plan using its own harness.
+7. After it reports EXECUTED, independently inspect the diff.
+8. Do not assume an implementation succeeded just because it says so.
+9. Continue until the implementation satisfies the success criteria.
+10. Avoid unnecessary rewrites.
+11. Return C2C structured control messages.
+12. Be substantive. PLAN and review replies must carry enough signal for
+    the agent to act on: rationale, per-file natural-language suggestions
     (which file, what to change and why), risks worth checking, and test
     advice. Never reply with a bare one-liner. Substance over length —
     but do not generate 40-step epics either.
-12. If you receive a HANDOFF message, this conversation continues an
+13. If you receive a HANDOFF message, this conversation continues an
     existing task. Trust the handoff brief for history, re-read any code
     you need through MCP, and resume from NEXT_EXPECTED_STEP.
 ```
+
+See `docs/ai-context.md` for the full AI_CONTEXT.md spec (template, who
+writes it, staleness handling, long-running-project phases).

@@ -94,9 +94,38 @@ anytime. / Skill 每天自动检查一次 GitHub，有新版本会自动更新�
 
 ## Install → Setup → Use (manual)
 
-1. Install the Codex Skill: copy `skill/` to `~/.codex/skills/codex-with-chatgpt/`.
+Works the same way with either coding agent — same Bridge, same MCP tools,
+same security model; only the Skill you install differs.
+
+**Codex**
+
+1. Install the Skill: copy `skill/` to `~/.codex/skills/codex-with-chatgpt/`.
 2. Tell Codex: **"Set up Codex with ChatGPT."** (中文: "使用 Codex with ChatGPT 完成首次配置。")
 3. Use Codex normally: **"Use Codex with ChatGPT to implement XXX."**
+
+**Claude Code**
+
+1. Install the Skill: copy `skill-claude-code/SKILL.md` to
+   `~/.claude/skills/codex-with-chatgpt/SKILL.md` (personal skill, available
+   in any project).
+2. Tell Claude Code: **"Set up Codex with ChatGPT."** (中文同上。)
+3. Use Claude Code normally: **"Use Codex with ChatGPT to implement XXX."**
+
+Both agents can use ChatGPT's normal Chat surface for planning/review (see
+[chatgpt-interaction-policy.md](docs/chatgpt-interaction-policy.md) — ChatGPT's
+own "Work" mode suggestions are auto-dismissed by default so the conversation
+stays a normal chat), and both can connect to the same workspace — the C2C
+Bridge, OAuth connector and saved ChatGPT conversation are shared, not
+duplicated per agent. Use one agent at a time per task (no concurrent
+same-workspace writes from both).
+
+Every coding-task session also bootstraps ChatGPT into the project through
+an `AI_CONTEXT.md` file at the workspace root — see
+[ai-context.md](docs/ai-context.md). It's a pointer, not a spec dump: where
+the project currently stands, what's authoritative right now, and what to
+read next, so ChatGPT doesn't have to read the whole repo (or be re-briefed
+by you) every session. The coding agent creates/updates it; ChatGPT only
+ever reads it, same as everything else in this project.
 
 That's the whole manual. You don't need to know what MCP, OAuth, tunnels,
 ports or localhost are — Codex configures everything automatically and you
@@ -201,7 +230,8 @@ Requirements: Node.js >= 20, git. `cloudflared` for the public connection
 (auto-detected; the Skill installs it for you).
 
 Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
-[security](docs/security.md) · [troubleshooting](docs/troubleshooting.md)
+[security](docs/security.md) · [troubleshooting](docs/troubleshooting.md) ·
+[ai-context](docs/ai-context.md)
 
 ## Project layout
 
@@ -211,15 +241,24 @@ src/
   mcp/        8 read-only tools, stateless Streamable HTTP
   auth/       OAuth 2.1 (PKCE, DCR, refresh rotation, revocation)
   pairing/    one-time pairing codes (CSPRNG, TTL, rate limits)
-  workspace/  path containment, sensitive-file policy, search, git
+  workspace/  path containment, sensitive-file policy, search, git,
+              chatgpt-surface policy, AI_CONTEXT.md detection (all agent-agnostic)
   tunnel/     TunnelProvider abstraction + Cloudflare Quick/Named Tunnel
   execution/  execution records for the review loop
   process/    daemon lifecycle
-  cli/        the c2c CLI
-skill/        the Codex Skill (the real UX layer)
+  cli/        the c2c CLI (--agent codex|claude-code where it matters)
+skill/            the Codex Skill (the real UX layer for Codex)
+skill-claude-code/  the Claude Code Skill (same protocol, adapted UX layer)
 tests/        unit + integration tests
-docs/         architecture / protocol / security / troubleshooting
+docs/         architecture / protocol / security / troubleshooting /
+              chatgpt-interaction-policy (shared Work-suggestion handling) /
+              ai-context (shared AI_CONTEXT.md project-bootstrap spec)
 ```
+
+Everything under `src/` is shared and agent-agnostic; only `skill/` and
+`skill-claude-code/` (plus the Codex-only sandbox allowlist step, gated by
+`--agent`) differ per coding agent. See
+[architecture.md](docs/architecture.md).
 
 ## Status & disclaimer
 

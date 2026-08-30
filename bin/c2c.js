@@ -8,6 +8,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(here, "..", "dist", "cli", "index.js");
 
 if (existsSync(dist)) {
+  // Dynamic import() requires a proper file:// URL on Windows — a raw
+  // "C:\..." path is misparsed as a URL with scheme "c:".
   await import(pathToFileURL(dist).href);
 } else {
   // dev fallback: run TypeScript sources through the tsx ESM loader

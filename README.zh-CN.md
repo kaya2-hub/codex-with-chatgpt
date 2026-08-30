@@ -47,9 +47,33 @@ Agent（Codex），然后去倒杯咖啡：
 
 ## 安装 → 配置 → 使用（手动版）
 
-1. 安装 Codex Skill：把 `skill/` 复制到 `~/.codex/skills/codex-with-chatgpt/`。
+Codex、Claude Code 两种编码 Agent 都可以使用——Bridge、MCP 工具、安全模型完全
+共用，只有安装的 Skill 不同。
+
+**Codex**
+
+1. 安装 Skill：把 `skill/` 复制到 `~/.codex/skills/codex-with-chatgpt/`。
 2. 对 Codex 说：**"使用 Codex with ChatGPT 完成首次配置。"**
 3. 之后正常使用：**"使用 Codex with ChatGPT，帮我实现 XXX。"**
+
+**Claude Code**
+
+1. 安装 Skill：把 `skill-claude-code/SKILL.md` 复制到
+   `~/.claude/skills/codex-with-chatgpt/SKILL.md`（个人级 Skill，任何项目都能用）。
+2. 对 Claude Code 说：**"使用 Codex with ChatGPT 完成首次配置。"**
+3. 之后正常使用：**"使用 Codex with ChatGPT，帮我实现 XXX。"**
+
+两种 Agent 都默认停留在 ChatGPT 的"普通对话"界面，遇到 ChatGPT 提示切换到
+"Work"时会自动关闭/拒绝（详见
+[chatgpt-interaction-policy.md](docs/chatgpt-interaction-policy.md)）；同一个
+项目的 Bridge、连接器、已保存的 ChatGPT 会话也是两边共用的，不会重复创建。
+但不支持两个 Agent 同时对同一项目并发写入，一次任务请只用其中一个。
+
+每次协作任务开始时，还会通过 Workspace 根目录下的 `AI_CONTEXT.md`
+让 ChatGPT 了解项目现状（详见 [ai-context.md](docs/ai-context.md)）——
+它只是一个指路牌，不是完整规范文档：记录项目现在处于什么阶段、当前正本是什么、
+接下来该读什么，这样 ChatGPT 不需要每次通读整个仓库，你也不需要每次重新
+介绍项目背景。文件由 Coding Agent 创建/更新，ChatGPT 和其他文件一样只读。
 
 说明书到此结束。你不需要知道 MCP、OAuth、Tunnel、端口、localhost 是什么——
 Codex 会自动完成所有配置，你只会看到：
@@ -155,11 +179,17 @@ src/
   tunnel/     TunnelProvider 抽象 + Cloudflare Quick Tunnel
   execution/  审查闭环所需的执行记录
   process/    守护进程生命周期
-  cli/        c2c 命令行
-skill/        Codex Skill（真正的 UX 层）
+  cli/        c2c 命令行（--agent codex|claude-code）
+skill/              Codex Skill（Codex 的 UX 层）
+skill-claude-code/  Claude Code Skill（同一协议，适配 Claude Code 的 UX 层）
 tests/        单元 + 集成测试
-docs/         架构 / 协议 / 安全 / 故障排查
+docs/         架构 / 协议 / 安全 / 故障排查 / ai-context（共用的
+              AI_CONTEXT.md 项目引导规范）/ chatgpt-interaction-policy（共用的
+              Work 提示处理策略）
 ```
+
+`src/` 下的内容完全通用、不区分 Agent；只有 `skill/`、`skill-claude-code/`
+以及仅 Codex 需要的沙箱白名单步骤（通过 `--agent` 区分）会因 Agent 而异。
 
 ## 状态与声明
 

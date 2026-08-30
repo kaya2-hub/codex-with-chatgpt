@@ -66,15 +66,28 @@ Linux: see Cloudflare's package instructions.
 The Skill installs this automatically during setup.
 
 ### Every new Codex chat “repairs” the connection / cannot write logs
-The C2C state directory lives outside the project (macOS:
+(Codex only — Claude Code has no sandbox step; see below.) The C2C state
+directory lives outside the project (macOS:
 `~/Library/Application Support/codex-with-chatgpt`; Windows:
 `%LOCALAPPDATA%\codex-with-chatgpt`). Codex's default sandbox cannot write
 there, so each new chat looks like a health-check failure.
 
-`c2c setup`, `c2c doctor` and `c2c sandbox-allow` add that directory to
-`[sandbox_workspace_write].writable_roots` in `~/.codex/config.toml`
-(`%USERPROFILE%\.codex\config.toml` on Windows). After that, later chats
-do not need elevation.
+`c2c setup --agent codex`, `c2c doctor --agent codex` and `c2c sandbox-allow`
+add that directory to `[sandbox_workspace_write].writable_roots` in
+`~/.codex/config.toml` (`%USERPROFILE%\.codex\config.toml` on Windows). After
+that, later chats do not need elevation. This step is skipped entirely for
+Claude Code (`--agent claude-code`): Claude Code uses its own permission
+prompts instead, and never gets a `~/.codex` directory written on its
+behalf.
+
+### ChatGPT keeps suggesting "Work" instead of staying in normal Chat
+Expected to be auto-dismissed by the Skill — see
+[chatgpt-interaction-policy.md](chatgpt-interaction-policy.md). Check
+`c2c chatgpt-policy -w <workspace> --json`; if `rejectWorkSuggestion` is
+`false`, someone disabled it in `.c2c.json`. If it's `true` and ChatGPT's UI
+still isn't being dismissed, the Skill likely could not confidently match
+the current UI (ChatGPT changes it often) — that is a documented fail-safe,
+not a bug, and the Skill should fall back to asking you for one click.
 
 ### Port already in use
 Handled automatically: an existing healthy bridge for the same workspace is

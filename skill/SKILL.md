@@ -25,7 +25,7 @@ whatever data it needs by itself.
    Speak in terms of "连接 ChatGPT / 安全连接 / 配对".
 3. The pairing code is the ONLY credential you may ever type into a browser.
    Never touch OAuth tokens, cookies, or session storage.
-4. If something fails, run `c2c doctor` and repair silently. Only involve the user
+4. If something fails, run `c2c doctor --agent codex` and repair silently. Only involve the user
    for logins, CAPTCHA, 2FA, or explicit consent screens — and then give them ONE action.
 5. ALWAYS use the built-in in-app browser (iab) for every ChatGPT step.
    Follow **In-app browser (ChatGPT)** below. NEVER Computer Use (no
@@ -49,9 +49,9 @@ whatever data it needs by itself.
    ONCE. After `{ "alreadyAllowed": true }` or `{ "added": true }`, stay silent.
 8. ChatGPT pages: only the URLs in **In-app browser (ChatGPT)**. Never start
    from chatgpt.com and click through menus.
-9. **Doctor gate.** After `c2c doctor --json`, do not `goto` ChatGPT and do not
-   send `[C2C]` until local is green — except the reconnect settings pages when
-   `chatgptRepair.needed` is true. Not green:
+9. **Doctor gate.** After `c2c doctor -w <workspace> --agent codex --json`, do not
+   `goto` ChatGPT and do not send `[C2C]` until local is green — except the
+   reconnect settings pages when `chatgptRepair.needed` is true. Not green:
    - `report.bridge.ok` is not true
    - `report.mcp.ok` is not true (unauthenticated local `/mcp` must be 401)
    - sandbox / state-dir write failed (EPERM)
@@ -61,6 +61,25 @@ whatever data it needs by itself.
      Do not Delete the ChatGPT connector — the address did not change)
    A ChatGPT-side 401 after a sent message is different: repair then, do not
    treat it as permission to skip this gate next time.
+10. **Stay on normal Chat; auto-dismiss Work suggestions.** Keep every ChatGPT
+    interaction on the normal Chat surface. If ChatGPT offers to switch to
+    Work, dismiss it yourself without asking the user, and never select the
+    affirmative ("Use Work" / "Switch to Work" / ...) option. This rule is
+    shared with Claude Code's C2C Skill — full detection/dismissal policy,
+    config (`chatgptSurface` / `rejectWorkSuggestion` in `.c2c.json`, read via
+    `c2c chatgpt-policy -w <workspace> --json`), and the user-fallback
+    conditions live in `docs/chatgpt-interaction-policy.md`. Apply it every
+    time the ChatGPT tab is opened or foregrounded, and after every `[C2C]`
+    message is sent. Failing to dismiss a suggestion never fails the C2C
+    connection itself (see that doc's Fail-safe section).
+11. **Project bootstrap via `AI_CONTEXT.md`.** At the start of every coding-task
+    session (see workflow below), check whether `AI_CONTEXT.md` exists at the
+    workspace root; if not, create an initial version yourself before opening
+    the ChatGPT conversation, grounded only in things you can verify (README,
+    docs, git state, the user's instructions, anything just confirmed with
+    ChatGPT) — never guess. ChatGPT never writes this file (it has no write
+    tool); only you do, informed by what ChatGPT confirms. Full spec, template,
+    and update rules: `docs/ai-context.md` — shared with Claude Code's Skill.
 
 ## In-app browser (ChatGPT)
 
@@ -84,6 +103,11 @@ that close the tab, hide the window, or stall on the settings page.
      `await tab.markDeliverable()`.
    Never close this tab. Finished, waiting for the user, or timed out: leave it
    marked (standby). Do not let default turn cleanup close it.
+   - **Work-suggestion check.** Right after foregrounding/claiming the tab, and
+     again after sending any `[C2C]` message: apply
+     `docs/chatgpt-interaction-policy.md` (golden rule 10). Never select the
+     affirmative "switch to Work" option; only dismiss/decline it, or fall
+     back to the user per that doc when it cannot be resolved safely.
 
 4. **URLs only** (same tab, `goto` — never hunt menus):
    - 开发人员模式: `https://chatgpt.com/#settings/Security`
@@ -196,7 +220,7 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
      `winget install Cloudflare.cloudflared`. Do this yourself; don't ask.
 2. If the c2c repo has no `node_modules`, run `pnpm install && pnpm build` in it.
 3. Run `c2c sandbox-allow --json`, then **Connection choice**, then
-   `c2c setup -w <workspace> --json`.
+   `c2c setup -w <workspace> --agent codex --json`.
    `sandbox-allow` edits Codex `config.toml` only — it adds C2C's state directory
    to `[sandbox_workspace_write].writable_roots` so later chats can write logs
    without elevation. If the write is denied, request approval and retry once.
@@ -286,11 +310,11 @@ chat per task or per Codex session.
 
 Protocol states: INIT → PLAN → EXECUTING → EXECUTED → REVIEW → (PLAN | DONE | BLOCKED).
 All control messages start with `[C2C]`. Keep Codex→ChatGPT messages under 1 KB.
-ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/protocol.md`.
+ChatGPT's replies are expected to be substantive (see step 4). Docs: `docs/protocol.md`.
 
 0. `c2c tunnel status -w <workspace> --json`. If `needsChoice`, follow
    **Connection choice** first (existing installs: ask once, then remember).
-   Then `c2c doctor -w <workspace> --json` (auto-repairs). **Doctor gate:** if local
+   Then `c2c doctor -w <workspace> --agent codex --json` (auto-repairs). **Doctor gate:** if local
    is not green, do not open ChatGPT and do not send INIT. If
    `namedRepair.needed` is true, tell the user `namedRepair.userMessage`, run
    `c2c tunnel login --json` (their browser; Cloudflare exception), then doctor
@@ -298,14 +322,18 @@ ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/proto
    (one paragraph, no internals), run **Workflow: reconnect after address
    reclaim**, then doctor again and only continue when the gate is green.
    Generate task id: `c2c_` + 4 random hex chars.
-1. Open the saved C2C conversation on the same iab tab (`c2c session --json`);
+1. **AI_CONTEXT.md check.** If `<workspace>/AI_CONTEXT.md` does not exist,
+   create an initial version now (see `docs/ai-context.md` — template,
+   grounding rules). If it exists, no local action needed; the boot prompt
+   already tells ChatGPT to read it via MCP before planning.
+2. Open the saved C2C conversation on the same iab tab (`c2c session --json`);
    only `goto` `https://chatgpt.com/` if none is saved. Foreground + markHandoff.
    On a NEW conversation confirm Chat mode (**In-app browser** §7), then send
    the boot prompt from `docs/protocol.md` §Boot Prompt and the workspace_info
    check. Confirm the reply names the current workspace before saving the
    session URL. Do not use the browser to re-read code MCP already provides.
    After sending a control message, wait per **In-app browser** §8.
-2. Send INIT with the user's goal:
+3. Send INIT with the user's goal:
 
 ```
 [C2C]
@@ -321,18 +349,18 @@ Inspect the connected workspace through the Codex with ChatGPT MCP connector.
 Produce a C2C PLAN message.
 ```
 
-3. Wait for ChatGPT's `STATE: PLAN` reply (**In-app browser** §8 — short DOM
+4. Wait for ChatGPT's `STATE: PLAN` reply (**In-app browser** §8 — short DOM
    checks, same tab; do not treat a 5-minute browser timeout as failure).
    Read GOAL/ACTIONS/TESTS/SUCCESS_CRITERIA.
    A good PLAN also carries RATIONALE and concrete natural-language edit
    suggestions (which file, what to change, why). If the reply is a bare
    one-liner with no rationale or file-level guidance, ask once:
    "Please expand the plan with rationale and concrete per-file suggestions."
-4. Execute the plan yourself with your own harness (your tools, your judgment;
+5. Execute the plan yourself with your own harness (your tools, your judgment;
    ChatGPT does not micro-manage tool calls).
-5. Record the execution so ChatGPT can read it via MCP:
+6. Record the execution so ChatGPT can read it via MCP:
    `c2c record -w <ws> --task c2c_f81a --iteration 1 --changed-files "src/a.ts,src/b.ts" --tests "27 passed" --exit-status ok`
-6. Send EXECUTED (no diffs, no logs):
+7. Send EXECUTED (no diffs, no logs):
 
 ```
 [C2C]
@@ -352,12 +380,18 @@ TESTS:
 Please independently inspect the workspace and current git diff through MCP.
 ```
 
-7. ChatGPT reviews via MCP (git_diff, read_file, test_status) and replies
+8. ChatGPT reviews via MCP (git_diff, read_file, test_status) and replies
    DONE / PLAN (next iteration) / BLOCKED.
-8. Loop. Respect maxIterations (`.c2c.json`, default 12). At the limit, pause and ask
+9. Loop. Respect maxIterations (`.c2c.json`, default 12). At the limit, pause and ask
    the user: "已完成 12 轮协作，仍有未解决问题，是否继续？"
-9. On DONE: summarize the result to the user in plain language.
-10. On BLOCKED: read ChatGPT's reason, fix what you can, or surface the single
+10. On DONE: summarize the result to the user in plain language. Then update
+    `AI_CONTEXT.md` if this task actually changed the project's current
+    state (phase, confirmed decisions, newly obsolete items) — grounded in
+    the real diff, test results, and what was just confirmed with ChatGPT,
+    never in the mere fact that a task finished. See `docs/ai-context.md`
+    § Updating it. If nothing about the project's current state changed,
+    leave the file alone.
+11. On BLOCKED: read ChatGPT's reason, fix what you can, or surface the single
     decision the user must make.
 
 ## Workflow: disconnect（"断开 ChatGPT"）
@@ -401,7 +435,7 @@ the previous public address is gone. Doctor already started a new one.
      (or `c2c pair --json` if it expired). Continue as soon as it is Connected —
      do not wait for 8 tools on the settings page.
    - If the name is already gone, skip Delete and only create.
-4. `c2c doctor --json` again. Same tab: `goto` the saved conversation
+4. `c2c doctor --agent codex --json` again. Same tab: `goto` the saved conversation
    (`c2c session`) only after the Doctor gate is green. Do not start a new
    audit/task chat just because the address changed.
 5. If the ChatGPT conversation was lost, follow Conversation management → Switch:
@@ -409,7 +443,7 @@ the previous public address is gone. Doctor already started a new one.
 
 ## Workflow: repair（anything looks broken）
 
-1. `c2c doctor -w <workspace> --json`. Doctor gate: do not open ChatGPT / send
+1. `c2c doctor -w <workspace> --agent codex --json`. Doctor gate: do not open ChatGPT / send
    `[C2C]` until local is green, except reconnect settings pages.
 2. If `namedRepair.needed`, tell the user `namedRepair.userMessage`, run
    `c2c tunnel login --json`, then doctor again. Do not Delete the connector.

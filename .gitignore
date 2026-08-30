@@ -9,3 +9,4 @@ desktop.ini
 .env.*
 !.env.example
 coverage/
+desktop.ini

@@ -93,6 +93,39 @@ still isn't being dismissed, the Skill likely could not confidently match
 the current UI (ChatGPT changes it often) — that is a documented fail-safe,
 not a bug, and the Skill should fall back to asking you for one click.
 
+**Known limitation:** even when the Work-suggestion dialog is correctly
+identified, some browser-automation backends can silently fail to deliver
+clicks (the pane reports itself as visible/displayed but the underlying page
+is not actually OS-focused, so click actions time out or have no effect,
+including on the dialog's own close/"×" control). Observed live on
+2026-08-31. Not something the Skill can detect or fix from inside the
+automation tool — see "Known limitation" in
+[chatgpt-interaction-policy.md](chatgpt-interaction-policy.md#known-limitation-observed-2026-08-31)
+for the required behavior: verify the dialog actually closed rather than
+trusting a successful/timed-out tool call, cap retries at ~2, and fall back
+to asking the user to (1) close the dialog, then (2) separately confirm the
+surface is back on "Chat" — one step at a time. A run that needed this
+fallback is not a successful automated Work-suggestion rejection.
+
+### A ChatGPT Project (Custom GPT) conversation says a connector tool "has been disabled"
+Confirmed live (2026-08-31): after a connector fails repeatedly inside one
+specific conversation in a ChatGPT Project, ChatGPT can permanently disable
+that tool for that exact thread — Delete + recreating the connector (even
+under the identical name, per "Delete THIS workspace's connector" above)
+does not restore it there, and no setting was found (not in Project
+settings, not in the connector's own settings) to re-enable a disabled tool
+in an already-affected thread. Two things to know:
+- **Project conversations attach a connector differently than plain chats.**
+  There is no "+" → plugin picker; instead, type `@` in the message box and
+  pick the connector by name from the mention list that appears. This works
+  in a *new* conversation in the same Project even when an old thread is stuck.
+- If the old thread is unusable, start a new conversation in the same
+  Project, attach the connector with `@`, confirm `workspace_info` works,
+  then send a `[C2C] STATE: HANDOFF` message (see `protocol.md`) summarizing
+  the stuck task(s) so ChatGPT can pick them back up and independently
+  re-verify current state via MCP rather than trusting the old thread's
+  history.
+
 ### Port already in use
 Handled automatically: an existing healthy bridge for the same workspace is
 reused; anything else makes the bridge pick a free port. Configuration follows

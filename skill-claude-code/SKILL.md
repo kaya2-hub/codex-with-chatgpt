@@ -111,7 +111,14 @@ change regardless of which coding agent is driving.
     with the Codex adapter so behavior is identical either way. Apply it
     every time the ChatGPT tab is opened or foregrounded, and after every
     `[C2C]` message is sent. Failing to dismiss a suggestion never fails the
-    C2C connection itself (see that doc's Fail-safe section).
+    C2C connection itself (see that doc's Fail-safe section). Verify the
+    dialog actually closed by re-reading the page — do not trust a click
+    tool call's success/timeout status alone, since browser-automation
+    input delivery can fail silently (observed live; see that doc's "Known
+    limitation" section). Cap retries at ~2 verified attempts, then fall
+    back to the user with the two-step manual sequence in that section
+    instead of retrying indefinitely; report such a run honestly as manual,
+    not automated, dismissal.
 11. **Project bootstrap via `AI_CONTEXT.md`.** At the start of every coding-task
     session (see workflow below), check whether `AI_CONTEXT.md` exists at the
     workspace root; if not, create an initial version yourself before opening
@@ -157,9 +164,13 @@ rule 5:
 ## Locations
 
 - The codex-with-chatgpt checkout lives at: `<CHECKOUT_PATH>`
-  (fill this in with the actual clone path the first time this Skill file is
-  installed — see the update workflow below for how it stays correct.)
-- CLI: run `node <CHECKOUT_PATH>/bin/c2c.js <command>` (or `c2c <command>` if
+  (installer/update MUST replace this line in the installed Skill with the
+  user's actual checkout path — see the update workflow below for how it
+  stays correct. Never leave the literal placeholder text in an installed
+  copy: a second unresolved `<CHECKOUT_PATH>` elsewhere in this file is
+  interpreted per the next bullet, not as something to fill in separately.)
+- CLI: let `<checkout>` mean the path on the previous line; run
+  `node "<checkout>/bin/c2c.js" <command>` (or `c2c <command>` if
   globally linked). All commands support `--json` for parsing, and every
   `setup`/`doctor` call from this adapter must include `--agent claude-code`.
 - If the checkout has no `node_modules` or no `dist/`, first run
@@ -194,6 +205,63 @@ Inside the checkout directory (see Locations):
    `c2c update-check --force --json` to refresh the cache (should now report up to date).
 5. Tell the user "✓ 已更新到最新版本" — then resume whatever task triggered this.
    (The updated SKILL.md takes effect from the next Claude Code session; that's expected.)
+
+## Workflow: 芋煮会（zero-touch, works on a brand-new workspace too）
+
+This is the primary entry point once "芋煮会" appears anywhere in the
+user's message — it supersedes needing a separate "首次配置" request first.
+Full shared spec: `docs/imonikai-bootstrap.md` — identical to the Codex
+adapter's version of this workflow, only the browser-driving mechanics
+differ (§ ChatGPT browser workflow above). Never ask the user to run
+`c2c setup`, `c2c tunnel choose`, or create the ChatGPT connector
+themselves — this workflow does all of that.
+
+1. `c2c imonikai status -w <workspace> --agent claude-code --json`.
+2. If `needsInit` is `false` and `tunnel.permanentUrlConfigured` is `true`:
+   skip straight to step 5 below (Project Bootstrap) — everything is already
+   set up, reuse it as-is. Do not call `imonikai init` again, do not touch
+   the tunnel or connector.
+2b. If `needsInit` is `false` but `tunnel.permanentUrlConfigured` is
+   `false`: this workspace already has a working connection, just not a
+   fixed hostname yet (e.g. it was set up before a `--zone` was known).
+   `needsInit` alone does NOT mean "nothing to do" — it only reflects OAuth
+   authorization, not the tunnel. Run step 3 below anyway: `imonikai init`
+   is safe to call on an already-initialized workspace; it only attempts
+   the named-tunnel upgrade and never recreates the existing connector or
+   forces reauthorization by itself. After it returns, run
+   `c2c doctor -w <workspace> --agent claude-code --json`: if the tunnel
+   URL actually changed (`chatgptRepair.needed` is `true`), follow
+   **Workflow: reconnect after address reclaim** to Delete + recreate the
+   *existing* connector — never a second one for this workspace. If
+   `chatgptRepair.needed` is `false` (the upgrade fell back to Quick Tunnel
+   again, or nothing changed), continue straight to step 5 with the
+   existing connection as-is.
+3. If `needsInit` is `true`: run
+   `c2c imonikai init -w <workspace> --agent claude-code --zone <domain> --json`
+   (omit `--zone` if you don't have one yet; `--hostname <full-hostname>`
+   instead if the workspace name isn't ASCII-friendly — propose a sensible
+   one yourself, e.g. "芋煮会商事" -> `--hostname imonikai.c2c.<domain>` —
+   see `docs/imonikai-bootstrap.md` § Hostnames for non-ASCII workspace names).
+   - If it asks for a Cloudflare login (first time only, this machine),
+     follow it — one browser action, on the user's own machine (this uses
+     the OS default browser via `cloudflared`, not your browser-automation
+     tool).
+   - It always succeeds with at least a Quick Tunnel — check
+     `permanentUrlConfigured`; if a named-tunnel attempt fell back this run,
+     the response's `repairs` explains why. This never blocks the task.
+4. Using the `mcpUrl` / `connectorName` / `pairingCode` from step 3 (or from
+   `status` if you skipped init): follow **Workflow: first-time setup**
+   steps 4–5 below to create/edit the ChatGPT connector, authorize it, send
+   the boot prompt, and save the session — this part still needs your own
+   browser control; the Bridge itself never touches a browser.
+5. **AI_CONTEXT.md check** (see golden rule 11 / `docs/ai-context.md`): if
+   `status.aiContext.exists` was `false`, create an initial version now,
+   grounded only in what you can verify — never guess.
+6. Continue directly into **Workflow: coding task**, starting at step 3
+   (send INIT) — step 2 (open conversation / boot prompt) is already done
+   by step 4 above.
+7. On DONE: update `AI_CONTEXT.md` per **Workflow: coding task** step 10,
+   same as any other task.
 
 ## Workflow: first-time setup（"使用 Codex with ChatGPT 完成首次配置" / "Connect ChatGPT to Claude Code"）
 

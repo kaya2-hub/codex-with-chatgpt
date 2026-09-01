@@ -25,7 +25,7 @@ import {
   TUNNEL_CHOICE_PROMPT,
 } from "../tunnel/state.js";
 import { Logger } from "../logger/index.js";
-import { getStateDir } from "../config/paths.js";
+import { getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
 import {
   ensureSandboxAllowlist,
   getCodexConfigPath,
@@ -1237,6 +1237,228 @@ tunnelCmd
       handleCliError(error, opts.json);
     }
   });
+
+// ---------------------------------------------------------------- imonikai (芋煮会: shared zero-touch bootstrap)
+//
+// Common layer for the "芋煮会" trigger in both Skills. Neither Skill
+// re-implements this decision tree in prose — both just call these two
+// commands and follow the JSON. See docs/imonikai-bootstrap.md.
+//
+// Built entirely on the tunnel primitives above (readTunnelState,
+// provisionNamedTunnel, chooseQuickTunnel) — no separate tunnel-state
+// implementation, so there is only ever one source of truth for a
+// workspace's Cloudflare tunnel.
+
+function defaultZoneFile(): string {
+  return path.join(getStateDir(), "imonikai", "default-zone.json");
+}
+
+function readDefaultZone(): string | null {
+  return readJsonIfExists<{ zone: string }>(defaultZoneFile())?.zone ?? null;
+}
+
+function writeDefaultZone(zone: string): void {
+  writeSecureJson(defaultZoneFile(), { zone, savedAt: new Date().toISOString() });
+}
+
+/** A zone derived by stripping the leftmost label off an explicit hostname,
+ *  used only when the caller gave --hostname but no --zone and none is
+ *  remembered yet (provisionNamedTunnel always needs a zone to record). */
+function deriveZoneFromHostname(hostname: string): string | null {
+  const parts = hostname.trim().toLowerCase().split(".");
+  return parts.length >= 3 ? parts.slice(1).join(".") : null;
+}
+
+interface ImonikaiStatus {
+  ok: true;
+  workspaceId: string;
+  workspaceName: string;
+  isNewWorkspace: boolean;
+  bridge: { running: boolean; port: number | null };
+  tunnel: { mode: "named" | "quick" | "none"; url: string | null; permanentUrlConfigured: boolean; hostname: string | null };
+  connector: { name: string | null; mcpUrl: string | null; authorized: boolean };
+  aiContext: { exists: boolean; path: string };
+  chatgptPolicy: { chatgptSurface: string; rejectWorkSuggestion: boolean };
+  needsInit: boolean;
+}
+
+async function imonikaiStatus(root: string): Promise<ImonikaiStatus> {
+  const workspace = new Workspace(root);
+  const lastEndpoint = readLastEndpoint(workspace.id);
+  const tunnelState = readTunnelState(workspace.id);
+  const namedReady = isNamedTunnelReady(tunnelState);
+  const isNewWorkspace = !lastEndpoint && needsTunnelChoice(tunnelState) && !workspace.aiContextInfo().exists;
+
+  const runtime = await findLiveBridge(workspace.id);
+  let bridgeRunning = false;
+  let port: number | null = null;
+  let tunnelUrl: string | null = null;
+  let mcpUrl: string | null = lastEndpoint?.mcpUrl ?? null;
+  let authorized = false;
+
+  if (runtime) {
+    bridgeRunning = true;
+    port = runtime.port;
+    try {
+      const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+      tunnelUrl = info.publicUrl ?? info.tunnel.url ?? null;
+      if (tunnelUrl) mcpUrl = mcpUrlFromPublic(tunnelUrl);
+      authorized = info.tokenCount > 0;
+    } catch {
+      // Bridge process exists but did not answer in time — report what we
+      // already know from disk rather than failing the whole status call.
+    }
+  }
+
+  return {
+    ok: true,
+    workspaceId: workspace.id,
+    workspaceName: workspace.name,
+    isNewWorkspace,
+    bridge: { running: bridgeRunning, port },
+    tunnel: {
+      mode: namedReady ? "named" : tunnelUrl ? "quick" : "none",
+      url: tunnelUrl,
+      permanentUrlConfigured: namedReady,
+      hostname: tunnelState.hostname ?? null,
+    },
+    connector: {
+      name: lastEndpoint?.connectorName ?? null,
+      mcpUrl,
+      authorized,
+    },
+    aiContext: workspace.aiContextInfo(),
+    chatgptPolicy: workspace.chatgptPolicy,
+    needsInit: !authorized,
+  };
+}
+
+const imonikai = program.command("imonikai").description('Shared "芋煮会" auto-bootstrap — see docs/imonikai-bootstrap.md');
+
+imonikai
+  .command("status")
+  .description("One consolidated check: is this workspace ready for 芋煮会, or does it need init?")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { workspace?: string; json: boolean }) => {
+    try {
+      const status = await imonikaiStatus(resolveWorkspace(opts.workspace));
+      if (opts.json) {
+        say(JSON.stringify(status));
+        return;
+      }
+      say(status.needsInit ? "需要执行 c2c imonikai init。" : "已就绪，可直接开始任务。");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+imonikai
+  .command("init")
+  .description("Zero-touch bootstrap: bridge + tunnel (named if a zone is known) + connector name + pairing code")
+  .option("-w, --workspace <path>")
+  .option("--agent <agent>", "calling coding agent: codex | claude-code")
+  .option("--hostname <hostname>", "explicit full hostname for the named tunnel (agent-proposed, e.g. imonikai.c2c.example.com)")
+  .option("--zone <domain>", "Cloudflare domain to derive <slug>.<zone> from, if --hostname is not given")
+  .option("--set-default-zone", "remember --zone as the default for future new workspaces", false)
+  .option("--json", "machine-readable output", false)
+  .action(
+    async (opts: {
+      workspace?: string;
+      agent?: string;
+      hostname?: string;
+      zone?: string;
+      setDefaultZone: boolean;
+      json: boolean;
+    }) => {
+      const root = resolveWorkspace(opts.workspace);
+      const results: string[] = [];
+      try {
+        const agent = parseAgent(opts.agent);
+        trySandboxAllow(agent);
+
+        const workspace = new Workspace(root);
+        const tunnelState = readTunnelState(workspace.id);
+
+        // Only make the one-time tunnel choice once per workspace, and only
+        // decide "named" when we have (or can derive) a zone — never guess a
+        // domain. provisionNamedTunnel never throws: on any failure it
+        // records "quick" with a fallback reason, same as a real user choice.
+        if (needsTunnelChoice(tunnelState)) {
+          const zone =
+            parseZoneInput(opts.zone ?? "") ??
+            readDefaultZone() ??
+            (opts.hostname ? deriveZoneFromHostname(opts.hostname) : null);
+          if (zone) {
+            if (!hasCloudflaredCert() && !opts.json) say(NAMED_LOGIN_PROMPT);
+            const result = await provisionNamedTunnel({
+              workspaceId: workspace.id,
+              workspaceName: workspace.name,
+              zone,
+              hostname: opts.hostname,
+            });
+            if (result.fallback) {
+              results.push(`Named Tunnel 未就绪，继续使用 Quick Tunnel：${result.error ?? result.userMessage ?? ""}`);
+            } else {
+              results.push(`已创建固定域名：https://${result.state.hostname}`);
+              if (opts.setDefaultZone) writeDefaultZone(zone);
+            }
+          } else {
+            chooseQuickTunnel(workspace.id);
+          }
+          if (await findLiveBridge(workspace.id)) {
+            await stopBridge(root);
+            // stopBridge fires /admin/shutdown without waiting for the
+            // process to actually exit — give it a moment so the next
+            // ensureBridge spawns fresh and picks up the new tunnel state
+            // instead of racing the still-dying old bridge.
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+        }
+
+        const previous = readLastEndpoint(workspace.id);
+        const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: true });
+        const connectorName = mcpUrl
+          ? persistWorkspaceEndpoint({
+              workspaceId: info.workspaceId,
+              workspaceName: info.workspaceName,
+              port: runtime.port,
+              publicUrl: info.publicUrl,
+              mcpUrl,
+              previous,
+            })
+          : connectorNameFor({
+              workspaceName: info.workspaceName,
+              workspaceId: info.workspaceId,
+              previousName: previous?.connectorName,
+              hadEndpointBefore: Boolean(previous),
+            });
+
+        const pairing = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
+        const status = await imonikaiStatus(root);
+
+        if (opts.json) {
+          say(
+            JSON.stringify({
+              ...status,
+              connectorName,
+              mcpUrl,
+              permanentUrlConfigured: status.tunnel.permanentUrlConfigured,
+              pairingCode: pairing.code,
+              pairingExpiresAt: pairing.expiresAt,
+              repairs: results,
+            })
+          );
+          return;
+        }
+        for (const line of results) say(line);
+        check(`连接器：${connectorName}`);
+        check(`配对码：${pairing.code}`);
+      } catch (error) {
+        handleCliError(error, opts.json);
+      }
+    }
+  );
 
 function handleCliError(error: unknown, json: boolean): void {
   const message = error instanceof Error ? error.message : String(error);

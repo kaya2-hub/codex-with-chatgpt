@@ -149,6 +149,11 @@ Ask the user to act, one action at a time, only when:
   safely (no confident match from the priority list above).
 - The dialog/control is not reachable by the agent's browser-automation tool
   at all.
+- The agent's own click/keypress actions on a correctly-identified control
+  are not taking effect — e.g. the automation tool reports the action
+  succeeded (or times out) but the UI state does not change after a bounded
+  number of retries (2 attempts is enough; do not loop indefinitely — see
+  Known limitation below).
 - CAPTCHA, login, or two-factor authentication is showing.
 - The action would require a decision only the user can make (explicit
   consent/permission screens).
@@ -156,7 +161,46 @@ Ask the user to act, one action at a time, only when:
 
 When asking, describe exactly what is on screen and exactly one action, e.g.
 "ChatGPT 中央に「Work で続ける」というダイアログが出ている。左下の「今はしない」を押して。"
-Never ask for more than one action per turn.
+Never ask for more than one action per turn. When the blocked action is
+specifically the Work-suggestion dismissal, the standard two-step manual
+fallback is:
+
+```
+Step 1 (one message): ask the user to close the dialog — e.g. click the "×"
+  in its top-right corner (or whatever close/decline control is visible).
+Step 2 (a separate message, only after the user confirms step 1 is done):
+  ask the user to switch the ChatGPT surface back to "Chat" using the
+  surface switcher (§ Detecting a Work suggestion) if it is not already on
+  Chat.
+```
+
+Do not combine these into one message ("close the dialog and switch to
+Chat") — confirm each step landed before asking for the next, since the
+agent cannot verify UI state changes it did not itself observe succeed.
+
+### Known limitation (observed 2026-08-31)
+
+During real end-to-end testing, a browser-automation backend's pane
+intermittently reported itself as "displayed" (`tabs_context`-equivalent
+check) while the underlying page reported `document.visibilityState` /
+`document.hasFocus()` as hidden/unfocused, and while in that state, click
+actions on a correctly-identified Work-suggestion dialog control
+consistently timed out and had no effect on the page — including the
+close/"×" control itself. Retrying the same click repeatedly did not help;
+only the user bringing the pane back into OS-level focus restored click
+delivery. This means automated dismissal can silently fail even when every
+step in "Detecting a Work suggestion" / "Resolving it" above was followed
+correctly — the failure was in the automation tool's input delivery, not in
+detection logic or selector choice.
+
+Because of this, do not treat "the click tool call returned/timed out
+without erroring" as proof the dismissal worked. Verify the dialog is
+actually gone (re-read the page/DOM) before continuing, and if it still has
+not gone after ~2 verified attempts, stop and use the manual two-step
+fallback above rather than continuing to retry. A session where this
+fallback was needed must not be reported as a successful automated
+Work-suggestion rejection — report it as: dismissal required manual user
+action, automation did not complete the rejection itself.
 
 ## Logging
 

@@ -230,10 +230,12 @@ Full threat model: [docs/security.md](docs/security.md)
 ```bash
 pnpm install
 pnpm build          # -> dist/, exposes the `c2c` bin
-pnpm test           # vitest: 146 tests (path security, OAuth, pairing, MCP e2e)
+pnpm test           # vitest suite (path security, OAuth, pairing, MCP e2e, tunnels)
 
 c2c setup           # bridge + tunnel + pairing code, all in one
 c2c sandbox-allow   # whitelist the settings dir in Codex (macOS + Windows)
+c2c tunnel status / choose   # one-time quick-vs-named tunnel choice
+c2c imonikai status / init   # zero-touch bootstrap for "芋煮会" — see docs/imonikai-bootstrap.md
 c2c status / doctor / pair / unpair / logs / stop
 ```
 
@@ -242,7 +244,7 @@ Requirements: Node.js >= 20, git. `cloudflared` for the public connection
 
 Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
 [security](docs/security.md) · [troubleshooting](docs/troubleshooting.md) ·
-[ai-context](docs/ai-context.md)
+[ai-context](docs/ai-context.md) · [imonikai-bootstrap](docs/imonikai-bootstrap.md)
 
 ## Project layout
 

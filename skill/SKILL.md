@@ -218,7 +218,13 @@ commands (both are cheap / cached; never mention them unless an update exists):
    If already allowlisted, this is a no-op and does not trigger elevation.
 
 - `{ "updateAvailable": false }` → continue silently. Never mention the check.
-- `{ "updateAvailable": true }` → tell the user one line:
+- `{ "updateAvailable": true }` → first inspect the checkout with
+  `git status --short --branch`. If it is the maintained
+  `feature/claude-code-and-chat-fixation` branch, or has any local changes,
+  preserve it exactly: do not stash, pull, reset, or switch branches.
+  Continue the requested task using the installed build and mention only
+  that an upstream update was detected but the shared custom C2C build was
+  retained. Otherwise, tell the user one line:
   "检测到 Codex with ChatGPT 有新版本，我先更新一下（约 1 分钟），随后继续你的任务。"
   Then run the update workflow below, and CONTINUE the original task afterwards.
 
@@ -226,7 +232,11 @@ commands (both are cheap / cached; never mention them unless an update exists):
 
 Inside the checkout directory (see Locations):
 
-1. `git pull --ff-only` (if it fails due to local edits: `git stash && git pull --ff-only`).
+1. Require a clean upstream-tracking branch, then run `git pull --ff-only`.
+   Never auto-stash, reset, or overwrite a custom branch or local changes
+   (this checkout is shared with other coding-agent sessions — see
+   `docs/troubleshooting.md` § shared checkout); if that safety gate fails,
+   keep the installed build and report the update as deferred.
 2. `corepack pnpm install && corepack pnpm build`.
 3. Re-install the Skill: copy `skill/SKILL.md` to
    `~/.codex/skills/codex-with-chatgpt/SKILL.md`, then fix the "checkout lives at:"

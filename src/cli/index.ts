@@ -1339,9 +1339,11 @@ imonikai
   .command("status")
   .description("One consolidated check: is this workspace ready for 芋煮会, or does it need init?")
   .option("-w, --workspace <path>")
+  .option("--agent <agent>", "calling coding agent: codex | claude-code (accepted for CLI-contract consistency with imonikai init; status itself is agent-agnostic)")
   .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; json: boolean }) => {
+  .action(async (opts: { workspace?: string; agent?: string; json: boolean }) => {
     try {
+      parseAgent(opts.agent);
       const status = await imonikaiStatus(resolveWorkspace(opts.workspace));
       if (opts.json) {
         say(JSON.stringify(status));

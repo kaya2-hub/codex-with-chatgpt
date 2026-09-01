@@ -10,6 +10,14 @@ describe("imonikai CLI contract", () => {
     expect(cliSource).toMatch(/imonikai\s*\n\s*\.command\("init"\)/);
   });
 
+  it("imonikai status accepts --agent, matching both Skills' documented CLI contract", () => {
+    const statusBlock = cliSource.slice(
+      cliSource.indexOf('.command("status")', cliSource.indexOf("const imonikai =")),
+      cliSource.indexOf('.command("init")', cliSource.indexOf("const imonikai ="))
+    );
+    expect(statusBlock).toContain('.option("--agent <agent>"');
+  });
+
   it("imonikai init accepts --agent, --hostname, --zone and --set-default-zone", () => {
     const initBlock = cliSource.slice(cliSource.indexOf('.command("init")', cliSource.indexOf("const imonikai =")));
     expect(initBlock).toContain('.option("--agent <agent>"');

@@ -146,6 +146,25 @@ Do not pick another project by name automatically. Open the collection that
 matches this workspace and tell Codex「已找到」, or say you want the old
 long-chat instead. Each workspace has its own Project and its own connector.
 
+### This c2c checkout is shared with other coding-agent sessions
+The `codex-with-chatgpt` checkout a Skill runs `c2c` from is not necessarily
+private to one session — a user may point multiple Codex/Claude Code
+sessions at the same checkout path (observed live, 2026-08-31: a second
+session hit `git status` showing uncommitted work-in-progress and unpushed
+local-only commits on `feature/claude-code-and-chat-fixation` from a
+different session it had no way to know about). Because of this:
+- Never run `git pull`, `git stash`, `git reset`, or switch branches in this
+  checkout as part of an *update check* — see the `updateAvailable` guard in
+  golden rule area / Workflow: update above. A custom branch or any local
+  changes mean another session may be actively using them; leave git state
+  alone and keep using the already-installed build.
+- If you need to actually update this shared checkout (the user explicitly
+  asked, not just a background daily check), say so and confirm before
+  touching git state, the same as any other action that could affect
+  another party's in-progress work.
+- Building (`pnpm install && pnpm build`) is safe to run anytime — it never
+  touches git state, only regenerates `dist/`.
+
 ### Completely stuck
 ```
 c2c stop

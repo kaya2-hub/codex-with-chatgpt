@@ -64,11 +64,29 @@ export interface ChatGptPolicy {
   rejectWorkSuggestion: boolean;
 }
 
+/**
+ * Opt-in reporting of confirmed C2C state transitions to Kokuban (黒板) --
+ * Personal Core's Activity Event Log. Absent by default: every workspace
+ * without this block behaves exactly as before (see src/session/kokuban.ts,
+ * the single hook point this feeds -- no per-workspace producer sprawl).
+ */
+export interface KokubanConfig {
+  /** projectKey as Kokuban should record it (Personal Core's project_key vocabulary). */
+  projectKey: string;
+  /** Default: https://core.bluecabi.net */
+  apiBaseUrl?: string;
+  /** Env var holding a kokuban:write-scoped bearer token. Default: KOKUBAN_WRITE_TOKEN. Never read from .c2c.json itself -- this file only ever names the env var, never a secret value. */
+  tokenEnvVar?: string;
+  /** Default: "coding_agent". */
+  actor?: string;
+}
+
 export interface ProjectConfig {
   name?: string;
   maxIterations?: number;
   chatgptSurface?: ChatGptSurface;
   rejectWorkSuggestion?: boolean;
+  kokuban?: KokubanConfig;
 }
 
 /** Defaults per spec: stay on normal Chat, auto-dismiss Work suggestions. */

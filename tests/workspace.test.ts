@@ -188,6 +188,24 @@ describe("workspace identity", () => {
     expect(namedWs.projectConfig.maxIterations).toBe(12);
     cleanup(named);
   });
+
+  it("has no kokuban config by default (opt-in only)", () => {
+    expect(ws.projectConfig.kokuban).toBeUndefined();
+  });
+
+  it("reads an opt-in .c2c.json kokuban block", () => {
+    const withKokuban = makeTmpDir("with-kokuban");
+    write(
+      withKokuban,
+      ".c2c.json",
+      JSON.stringify({
+        kokuban: { projectKey: "bluecabi-personal-core", tokenEnvVar: "KOKUBAN_WRITE_TOKEN" },
+      })
+    );
+    const kokubanWs = new Workspace(withKokuban);
+    expect(kokubanWs.projectConfig.kokuban).toEqual({ projectKey: "bluecabi-personal-core", tokenEnvVar: "KOKUBAN_WRITE_TOKEN" });
+    cleanup(withKokuban);
+  });
 });
 
 describe("chatgpt-surface policy", () => {

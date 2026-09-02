@@ -65,6 +65,7 @@ import {
 } from "../session/state.js";
 import { appendExecutionRecord } from "../execution/records.js";
 import { saveExecutionOutput } from "../execution/output.js";
+import { reportKokubanTransition } from "../session/kokuban.js";
 
 const program = new Command();
 
@@ -965,7 +966,7 @@ session
   .option("--next-step <text>")
   .option("--clear-checkpoint", "drop the active checkpoint (task DONE)", false)
   .action(
-    (opts: {
+    async (opts: {
       workspace?: string;
       url?: string;
       title?: string;
@@ -1027,6 +1028,26 @@ session
         check("已记录 ChatGPT 合集，后续从合集页新开或复用对话");
       } else {
         check("已记录 ChatGPT 会话，后续任务将复用");
+      }
+
+      // Opt-in only: workspaces without a "kokuban" block in .c2c.json (the
+      // overwhelming majority) hit `!opts.state` or `!kokubanConfig` and
+      // never call reportKokubanTransition at all -- zero behavior change.
+      const kokubanConfig = workspace.projectConfig.kokuban;
+      if (kokubanConfig && opts.state) {
+        const result = await reportKokubanTransition({
+          config: kokubanConfig,
+          state: opts.state,
+          taskId: saved.taskId,
+          iteration: saved.iteration,
+        });
+        if (result.attempted) {
+          if (result.ok) {
+            check(`Kokuban: ${result.detail}`);
+          } else {
+            say(`⚠ Kokubanへの記録に失敗しました(session自体は正常に保存済み): ${result.detail}`);
+          }
+        }
       }
     }
   );

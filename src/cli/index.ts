@@ -14,9 +14,11 @@ import {
   hasCloudflaredCert,
   ProcessCloudflaredAccount,
   provisionNamedTunnel,
+  type CloudflaredAccount,
 } from "../tunnel/named-provision.js";
 import { parseZoneInput, suggestedNamedHostname } from "../tunnel/hostname.js";
 import {
+  canUpgradeToNamed,
   isNamedTunnelReady,
   NAMED_LOGIN_PROMPT,
   NAMED_REPAIR_MESSAGE,
@@ -47,6 +49,7 @@ import {
   writeLastEndpoint,
   type LastEndpoint,
 } from "../config/endpoint.js";
+import { isConnectorRepairPending, readConnectorConfirmation } from "../config/connectorConfirmation.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 import {
   clearChatPointer,
@@ -163,7 +166,7 @@ interface PairingResponse {
   expiresAt: number;
 }
 
-interface AdminInfo {
+export interface AdminInfo {
   workspaceId: string;
   workspaceName: string;
   workspaceRoot: string;
@@ -171,6 +174,7 @@ interface AdminInfo {
   publicUrl: string | null;
   tunnel: { running: boolean; url: string | null; provider: string };
   tokenCount: number;
+  hasUsableAuthorization: boolean;
   pairingActive: boolean;
   pid: number;
   startedAt: string;
@@ -513,6 +517,16 @@ program
       previousMcpUrl: string | null;
       pairingCode?: string;
       pairingExpiresAt?: number;
+      /** Distinct from connectorAction/reason (both derived only from OUR
+       *  OWN locally-persisted address bookkeeping): true when the URL we
+       *  currently want ChatGPT to use has never been confirmed by an
+       *  actual, successful OAuth round trip (see connectorConfirmation.ts).
+       *  Writing local state is not proof ChatGPT's connector finished
+       *  reconnecting — Delete+recreate+re-auth is a manual, human-driven
+       *  step that can fail or be abandoned mid-way. */
+      connectorRepairPending: boolean;
+      desiredEndpoint: string | null;
+      confirmedConnectorEndpoint: string | null;
       pages: {
         developerMode: string;
         plugins: string;
@@ -524,6 +538,9 @@ program
       connectorName,
       mcpUrl: lastEndpoint?.mcpUrl ?? null,
       previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
+      connectorRepairPending: false,
+      desiredEndpoint: lastEndpoint?.mcpUrl ?? null,
+      confirmedConnectorEndpoint: workspace ? readConnectorConfirmation(workspace.id)?.confirmedMcpUrl ?? null : null,
       pages: {
         developerMode: CHATGPT_DEVELOPER_MODE_URL,
         plugins: CHATGPT_PLUGINS_URL,
@@ -534,12 +551,11 @@ program
     if (runtime) {
       let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
       if (namedReady && opts.fix && info.tunnel.provider !== "cloudflare-named") {
-        await stopBridge(root);
-        await new Promise((resolve) => setTimeout(resolve, 400));
         try {
-          runtime = (await ensureBridge(root)).runtime;
-          info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-          results.push("已切换到固定域名连接");
+          const repair = await attemptNamedFallbackRepair(root);
+          runtime = repair.runtime;
+          info = repair.info;
+          results.push(repair.repaired ? "已切换到固定域名连接" : "尝试恢复固定域名连接，但目前仍在使用临时地址");
         } catch (error) {
           report.tunnel = { ok: false, detail: (error as Error).message };
         }
@@ -592,15 +608,31 @@ program
               previous: lastEndpoint,
             })
           : connectorName;
+        // No backfill: a URL with a currently-valid token but no recorded
+        // confirmation is NOT proof the token was ever exchanged against
+        // THIS URL — it could equally be a leftover, still-unexpired token
+        // from a PREVIOUS URL that this workspace's tunnel/connector has
+        // since moved past (e.g. old URL -> tunnel changed -> doctor
+        // persisted the new URL -> repair never actually completed -> old
+        // token is still valid -> the new URL would get wrongly confirmed).
+        // Unconfirmable connectors — including ones that predate this
+        // tracking entirely — stay pending rather than being guessed into
+        // "confirmed". They keep working; doctor just can't vouch for them
+        // until a real authorization_code exchange is observed against the
+        // exact current URL (see server.ts's onAuthorizationCodeExchanged).
+        const repairPending = nextMcp ? isConnectorRepairPending(nextMcp, info.workspaceId) : false;
         chatgptRepair = {
           ...chatgptRepair,
-          needed: action === "update",
+          needed: action === "update" || repairPending,
           reason: action === "update" ? "address_reclaimed" : undefined,
           connectorAction: action,
           connectorName: boundName,
           userMessage: action === "update" ? reclaimUserMessage(boundName) : undefined,
           mcpUrl: nextMcp,
           previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
+          connectorRepairPending: repairPending,
+          desiredEndpoint: nextMcp,
+          confirmedConnectorEndpoint: readConnectorConfirmation(info.workspaceId)?.confirmedMcpUrl ?? null,
         };
         if (action === "update") {
           try {
@@ -1261,28 +1293,193 @@ function writeDefaultZone(zone: string): void {
   writeSecureJson(defaultZoneFile(), { zone, savedAt: new Date().toISOString() });
 }
 
-/** A zone derived by stripping the leftmost label off an explicit hostname,
- *  used only when the caller gave --hostname but no --zone and none is
- *  remembered yet (provisionNamedTunnel always needs a zone to record). */
-function deriveZoneFromHostname(hostname: string): string | null {
-  const parts = hostname.trim().toLowerCase().split(".");
-  return parts.length >= 3 ? parts.slice(1).join(".") : null;
+/** The actual logic `imonikai init` runs to decide/apply the tunnel choice
+ *  or a later Quick->Named upgrade — extracted (not mirrored) so tests can
+ *  exercise this exact application-level path, including the
+ *  `canUpgradeToNamed` branch, without needing to spawn the CLI as a
+ *  subprocess. Never guesses a zone by stripping labels off `hostname` — a
+ *  multi-label hostname (e.g. imonikai.c2c.example.com) would silently
+ *  derive a non-apex "zone" (c2c.example.com), which Cloudflare's default
+ *  Universal SSL certificate does not cover: DNS routing succeeds but TLS
+ *  then fails with a bare handshake error (confirmed live, 2026-09-02 —
+ *  see docs/troubleshooting.md). A zone must come from an explicit `zone`
+ *  or an already-saved default; if neither is known, Named provisioning is
+ *  simply skipped this run (falls through to/stays on Quick). */
+export async function applyTunnelChoiceOrUpgrade(opts: {
+  workspaceId: string;
+  workspaceName: string;
+  workspaceRoot: string;
+  hostname?: string;
+  zone?: string;
+  setDefaultZone: boolean;
+  /** Suppress the Cloudflare-login prompt message (JSON-mode callers, tests). */
+  quiet?: boolean;
+  /** Injected Cloudflare account adapter — defaults to the real
+   *  ProcessCloudflaredAccount; tests pass a fake so this exact application
+   *  path (used verbatim by `imonikai init`) never needs a real
+   *  cloudflared/Cloudflare account to be exercised. */
+  account?: CloudflaredAccount;
+}): Promise<{ messages: string[] }> {
+  const messages: string[] = [];
+  const tunnelState = readTunnelState(opts.workspaceId);
+  const zoneCandidate = (): string | null => parseZoneInput(opts.zone ?? "") ?? readDefaultZone();
+  const restartBridgeIfLive = async (): Promise<void> => {
+    if (await findLiveBridge(opts.workspaceId)) {
+      await stopBridge(opts.workspaceRoot);
+      // stopBridge fires /admin/shutdown without waiting for the process
+      // to actually exit — give it a moment so the next ensureBridge
+      // spawns fresh and picks up the new tunnel state instead of racing
+      // the still-dying old bridge.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  };
+
+  // Only make the one-time tunnel choice once per workspace, and only
+  // decide "named" when we have (or can derive) a zone — never guess a
+  // domain. provisionNamedTunnel never throws: on any failure it records
+  // "quick" with a fallback reason, same as a real user choice.
+  if (needsTunnelChoice(tunnelState)) {
+    const zone = zoneCandidate();
+    if (zone) {
+      if (!hasCloudflaredCert() && !opts.quiet) say(NAMED_LOGIN_PROMPT);
+      const result = await provisionNamedTunnel({
+        workspaceId: opts.workspaceId,
+        workspaceName: opts.workspaceName,
+        zone,
+        hostname: opts.hostname,
+        account: opts.account,
+      });
+      if (result.fallback) {
+        messages.push(`Named Tunnel 未就绪，继续使用 Quick Tunnel：${result.error ?? result.userMessage ?? ""}`);
+      } else {
+        messages.push(`已创建固定域名：https://${result.state.hostname}`);
+        if (opts.setDefaultZone) writeDefaultZone(zone);
+      }
+    } else {
+      chooseQuickTunnel(opts.workspaceId);
+    }
+    await restartBridgeIfLive();
+  } else if (canUpgradeToNamed(tunnelState)) {
+    // A one-time "quick" choice was already made earlier, but a zone is
+    // now available (or was passed this run) — try a safe upgrade to
+    // Named without re-asking. A quick user who never supplies a zone
+    // stays silently on Quick Tunnel forever, same as before; a failed
+    // upgrade attempt never disrupts the already-working Quick Tunnel
+    // bridge (provisionNamedTunnel itself never throws).
+    const zone = zoneCandidate();
+    if (zone) {
+      if (!hasCloudflaredCert() && !opts.quiet) say(NAMED_LOGIN_PROMPT);
+      const result = await provisionNamedTunnel({
+        workspaceId: opts.workspaceId,
+        workspaceName: opts.workspaceName,
+        zone,
+        hostname: opts.hostname,
+        account: opts.account,
+      });
+      if (!result.fallback) {
+        messages.push(`已升级为固定域名：https://${result.state.hostname}`);
+        if (opts.setDefaultZone) writeDefaultZone(zone);
+        await restartBridgeIfLive();
+      }
+    }
+  }
+  return { messages };
 }
 
-interface ImonikaiStatus {
+async function defaultBridgeRestart(root: string): Promise<{ runtime: RuntimeState; info: AdminInfo }> {
+  await stopBridge(root);
+  // stopBridge fires /admin/shutdown without waiting for the process to
+  // actually exit — give it a moment so the next ensureBridge spawns
+  // fresh and picks up the tunnel state instead of racing the still-dying
+  // old bridge.
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const runtime = (await ensureBridge(root)).runtime;
+  // ensureBridge only brings the local HTTP server up — the actual tunnel
+  // (Named or Quick) is never started until this explicit call (see
+  // ensureBridgeAndTunnel above, which does the same thing for the same
+  // reason). Skipping it would leave `info.tunnel.provider` reporting
+  // whatever tunnelForWorkspace() statically constructed at process
+  // startup (e.g. "cloudflare-named" for a workspace whose persisted
+  // preference is "named") even though `.start()` was never called on
+  // it — provider would already look "correct" while running/publicUrl
+  // stayed false/null. If BOTH Named and its Quick fallback fail here,
+  // this throws (matching /admin/tunnel/start's own 500 contract) and
+  // propagates to the caller, same as any other repair failure.
+  await adminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/start", 90_000);
+  const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+  return { runtime, info };
+}
+
+/** Recovers a workspace whose Named Tunnel is configured but whose bridge
+ *  is currently running degraded on Quick (P2-2's runtime fallback,
+ *  surfaced as `ImonikaiStatus.tunnel.namedFallbackActive`). Restarting
+ *  the bridge constructs a fresh CloudflaredNamedTunnel and gives it
+ *  another chance to connect — the earlier failure is often transient
+ *  (DNS/cert propagation, a cloudflared hiccup). This is the exact repair
+ *  `c2c doctor --fix` performs when it finds this state; extracted (not
+ *  mirrored — `doctor`'s action calls this directly) so `namedFallbackActive`
+ *  has a real, independently-testable repair action to route to instead of
+ *  the (no-op in this exact state) `imonikai init` / `applyTunnelChoiceOrUpgrade`
+ *  path — see docs/imonikai-bootstrap.md § Recovering from a Named fallback.
+ *
+ *  `restart` is injectable so tests can simulate the outcome without
+ *  spawning a real `c2c serve` subprocess or needing a real
+ *  cloudflared/Cloudflare account; defaults to the real
+ *  stop-then-restart-the-daemon-and-start-the-tunnel sequence.
+ *
+ *  `repaired` requires `tunnel.provider === "cloudflare-named"` AND
+ *  `tunnel.running` AND a non-null `tunnel.url` — the provider name alone
+ *  is set as soon as the bridge process constructs its tunnel object
+ *  (tunnelForWorkspace(), at startup, before `.start()` is ever called),
+ *  so checking only the name would report "repaired" for a Named
+ *  provider that was constructed but never actually connected. */
+export async function attemptNamedFallbackRepair(
+  root: string,
+  restart: (root: string) => Promise<{ runtime: RuntimeState; info: AdminInfo }> = defaultBridgeRestart
+): Promise<{ repaired: boolean; runtime: RuntimeState; info: AdminInfo }> {
+  const { runtime, info } = await restart(root);
+  const repaired = info.tunnel.provider === "cloudflare-named" && info.tunnel.running && info.tunnel.url !== null;
+  return { repaired, runtime, info };
+}
+
+export interface ImonikaiStatus {
   ok: true;
   workspaceId: string;
   workspaceName: string;
   isNewWorkspace: boolean;
   bridge: { running: boolean; port: number | null };
-  tunnel: { mode: "named" | "quick" | "none"; url: string | null; permanentUrlConfigured: boolean; hostname: string | null };
+  tunnel: {
+    mode: "named" | "quick" | "none";
+    url: string | null;
+    /** "configured" only — a hostname/tunnel name is on record. This does
+     *  NOT mean it currently resolves, has a valid TLS cert, or answers
+     *  requests (see `reachable`). Kept distinct on purpose: a broken
+     *  hostname must not read as "ready" — see docs/troubleshooting.md's
+     *  zone-apex warning for a real, confirmed way this goes wrong. */
+    permanentUrlConfigured: boolean;
+    hostname: string | null;
+    /** null = not checked (no URL to check, or bridge unreachable so no
+     *  check was attempted this call); true/false = the result of an
+     *  actual `GET {url}/health` just now. */
+    reachable: boolean | null;
+    /** True when the persisted preference is Named (`permanentUrlConfigured`)
+     *  but the tunnel actually running right now is Quick — the Named
+     *  Tunnel failed to start and this run degraded to Quick (see
+     *  server.ts's P2-2 runtime fallback). `mode` already reflects the
+     *  live "quick" reality; this flag exists so a caller can specifically
+     *  detect "configured Named is broken" rather than just "currently on
+     *  Quick" (which is also the normal state for a workspace that simply
+     *  never configured Named at all). Also forces `needsInit: true` below
+     *  — a Skill must not treat this as a healthy, completed setup. */
+    namedFallbackActive: boolean;
+  };
   connector: { name: string | null; mcpUrl: string | null; authorized: boolean };
   aiContext: { exists: boolean; path: string };
   chatgptPolicy: { chatgptSurface: string; rejectWorkSuggestion: boolean };
   needsInit: boolean;
 }
 
-async function imonikaiStatus(root: string): Promise<ImonikaiStatus> {
+export async function imonikaiStatus(root: string): Promise<ImonikaiStatus> {
   const workspace = new Workspace(root);
   const lastEndpoint = readLastEndpoint(workspace.id);
   const tunnelState = readTunnelState(workspace.id);
@@ -1295,20 +1492,58 @@ async function imonikaiStatus(root: string): Promise<ImonikaiStatus> {
   let tunnelUrl: string | null = null;
   let mcpUrl: string | null = lastEndpoint?.mcpUrl ?? null;
   let authorized = false;
+  // What actually answered `/admin/info` just now (info.tunnel.provider —
+  // "cloudflare-named" / "cloudflare-quick"), when the bridge is reachable.
+  // Distinct from `namedReady` (persisted preference): a Named Tunnel that
+  // fails to start falls back to a live Quick Tunnel for that run (see
+  // server.ts's P2-2 fallback) WITHOUT changing the persisted preference —
+  // so `namedReady` alone cannot tell a real Named connection apart from
+  // "configured Named, but actually running degraded on Quick right now".
+  // Null only when there is no live answer to ask at all.
+  let liveProvider: string | null = null;
 
+  let reachable: boolean | null = null;
   if (runtime) {
     bridgeRunning = true;
     port = runtime.port;
     try {
       const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
       tunnelUrl = info.publicUrl ?? info.tunnel.url ?? null;
+      liveProvider = info.tunnel.provider;
       if (tunnelUrl) mcpUrl = mcpUrlFromPublic(tunnelUrl);
-      authorized = info.tokenCount > 0;
+      // hasUsableAuthorization re-checks expiry live, unlike a raw token
+      // count — a token can be valid at bridge start and silently expire
+      // while the process keeps running (see AuthStore.hasUsableAuthorization).
+      authorized = info.hasUsableAuthorization;
+      if (tunnelUrl) {
+        try {
+          const response = await fetch(`${tunnelUrl}/health`, { signal: AbortSignal.timeout(8000) });
+          reachable = response.ok;
+        } catch {
+          reachable = false;
+        }
+      }
     } catch {
       // Bridge process exists but did not answer in time — report what we
       // already know from disk rather than failing the whole status call.
     }
   }
+
+  // Prefer the live answer whenever we have one — it reflects what is
+  // ACTUALLY running right now, including a Named->Quick runtime fallback.
+  // Only fall back to guessing from persisted state when the bridge itself
+  // couldn't be reached at all (nothing live to ask).
+  const mode: "named" | "quick" | "none" =
+    liveProvider === "cloudflare-named"
+      ? "named"
+      : liveProvider === "cloudflare-quick"
+        ? "quick"
+        : namedReady
+          ? "named"
+          : tunnelUrl
+            ? "quick"
+            : "none";
+  const namedFallbackActive = namedReady && liveProvider === "cloudflare-quick";
 
   return {
     ok: true,
@@ -1317,10 +1552,12 @@ async function imonikaiStatus(root: string): Promise<ImonikaiStatus> {
     isNewWorkspace,
     bridge: { running: bridgeRunning, port },
     tunnel: {
-      mode: namedReady ? "named" : tunnelUrl ? "quick" : "none",
+      mode,
       url: tunnelUrl,
       permanentUrlConfigured: namedReady,
       hostname: tunnelState.hostname ?? null,
+      reachable,
+      namedFallbackActive,
     },
     connector: {
       name: lastEndpoint?.connectorName ?? null,
@@ -1329,7 +1566,7 @@ async function imonikaiStatus(root: string): Promise<ImonikaiStatus> {
     },
     aiContext: workspace.aiContextInfo(),
     chatgptPolicy: workspace.chatgptPolicy,
-    needsInit: !authorized,
+    needsInit: !authorized || namedFallbackActive,
   };
 }
 
@@ -1380,43 +1617,16 @@ imonikai
         trySandboxAllow(agent);
 
         const workspace = new Workspace(root);
-        const tunnelState = readTunnelState(workspace.id);
-
-        // Only make the one-time tunnel choice once per workspace, and only
-        // decide "named" when we have (or can derive) a zone — never guess a
-        // domain. provisionNamedTunnel never throws: on any failure it
-        // records "quick" with a fallback reason, same as a real user choice.
-        if (needsTunnelChoice(tunnelState)) {
-          const zone =
-            parseZoneInput(opts.zone ?? "") ??
-            readDefaultZone() ??
-            (opts.hostname ? deriveZoneFromHostname(opts.hostname) : null);
-          if (zone) {
-            if (!hasCloudflaredCert() && !opts.json) say(NAMED_LOGIN_PROMPT);
-            const result = await provisionNamedTunnel({
-              workspaceId: workspace.id,
-              workspaceName: workspace.name,
-              zone,
-              hostname: opts.hostname,
-            });
-            if (result.fallback) {
-              results.push(`Named Tunnel 未就绪，继续使用 Quick Tunnel：${result.error ?? result.userMessage ?? ""}`);
-            } else {
-              results.push(`已创建固定域名：https://${result.state.hostname}`);
-              if (opts.setDefaultZone) writeDefaultZone(zone);
-            }
-          } else {
-            chooseQuickTunnel(workspace.id);
-          }
-          if (await findLiveBridge(workspace.id)) {
-            await stopBridge(root);
-            // stopBridge fires /admin/shutdown without waiting for the
-            // process to actually exit — give it a moment so the next
-            // ensureBridge spawns fresh and picks up the new tunnel state
-            // instead of racing the still-dying old bridge.
-            await new Promise((resolve) => setTimeout(resolve, 500));
-          }
-        }
+        const { messages: tunnelMessages } = await applyTunnelChoiceOrUpgrade({
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          workspaceRoot: root,
+          hostname: opts.hostname,
+          zone: opts.zone,
+          setDefaultZone: opts.setDefaultZone,
+          quiet: opts.json,
+        });
+        results.push(...tunnelMessages);
 
         const previous = readLastEndpoint(workspace.id);
         const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: true });
@@ -1478,7 +1688,21 @@ function handleCliError(error: unknown, json: boolean): void {
   process.exitCode = 1;
 }
 
-program.parseAsync(process.argv).catch((error: Error) => {
-  cross(error.message);
-  process.exit(1);
-});
+/** Actually runs the CLI (parses `argv` and dispatches to a command). This
+ *  module itself has NO top-level auto-execution — importing it (as tests
+ *  do, to call imonikaiStatus/applyTunnelChoiceOrUpgrade directly, the
+ *  real functions the CLI actions use, not a mirror) never runs a real CLI
+ *  parse of the caller's own argv. The one real entry point is
+ *  `src/cli/run.ts`, which unconditionally calls this — see its own
+ *  comment for why "is this the main module?" guessing was dropped
+ *  instead of fixed: it silently broke the published dist/npm path.
+ *  Uses `process.exitCode` rather than `process.exit()` so this stays
+ *  safe to call from a long-lived process (a test runner) too. */
+export async function runCli(argv: string[] = process.argv): Promise<void> {
+  try {
+    await program.parseAsync(argv);
+  } catch (error) {
+    cross((error as Error).message);
+    process.exitCode = 1;
+  }
+}

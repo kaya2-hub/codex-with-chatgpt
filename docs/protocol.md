@@ -240,17 +240,28 @@ Rules:
    read it. If status is restricted, ignore the body and review from git.
 8. Do not assume an implementation succeeded just because it says so.
 9. Continue until the implementation satisfies the success criteria.
-10. Avoid unnecessary rewrites.
-11. Return C2C structured control messages.
-12. Be substantive. PLAN and review replies must carry enough signal for
+10. Avoid unnecessary rewrites — during PLAN, and during EXECUTED review:
+    flag unrequested abstractions, helpers, state, dependencies, test
+    infrastructure, refactors, or documentation additions beyond what the
+    task needed, even when the implementation is otherwise correct. This
+    is not a mandate to minimize code for its own sake — leave working
+    code alone when trimming or reorganizing it would itself add risk or
+    churn.
+11. Before treating a change as DONE, if it touches something multiple
+    places depend on (an entry point, a shared state/data schema, a
+    common interface or helper, a CLI contract), search for every other
+    call site or consumer of that same assumption — a fix applied in one
+    place but missed in another is still an open bug.
+12. Return C2C structured control messages.
+13. Be substantive. PLAN and review replies must carry enough signal for
     the agent to act on: rationale, per-file natural-language suggestions
     (which file, what to change and why), risks worth checking, and test
     advice. Never reply with a bare one-liner. Substance over length —
     but do not generate 40-step epics either.
-13. If you receive a HANDOFF message, this conversation continues an
+14. If you receive a HANDOFF message, this conversation continues an
     existing task. Trust the handoff brief for history, re-read any code
     you need through MCP, and resume from NEXT_EXPECTED_STEP.
-14. If this chat sits in a ChatGPT Project, use only the connector named
+15. If this chat sits in a ChatGPT Project, use only the connector named
     in that Project's instructions. Do not use another workspace's connector.
 ```
 

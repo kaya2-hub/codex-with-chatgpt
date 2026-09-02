@@ -12,6 +12,16 @@ export interface OAuthDeps {
   workspaceName: string;
   getBaseUrl: (req: Request) => string;
   logger: Logger;
+  /** Called once a `POST /oauth/token` authorization_code exchange actually
+   *  succeeds, with the ORIGIN THE REQUEST ITSELF ARRIVED ON (`req.protocol`
+   *  + `req.get("host")` — never the configured/desired public URL). The
+   *  caller must compare this against what it currently believes the
+   *  public URL to be, and only then record a "confirmed" endpoint — see
+   *  connectorConfirmation.ts. A request that arrived over loopback (a
+   *  local admin call, a test hitting `bridge.localBaseUrl()`, an internal
+   *  retry) must never be able to confirm the public tunnel URL just
+   *  because one happens to be configured. */
+  onAuthorizationCodeExchanged?: (requestOrigin: string) => void;
 }
 
 interface PendingAuthRequest {
@@ -222,6 +232,12 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       return;
     }
     const scopes = filterScopes(query.scope);
+    if (scopes.length === 0) {
+      // query.scope was non-empty but named only unsupported values —
+      // never fall back to granting everything (see filterScopes).
+      fail("invalid_scope", "None of the requested scopes are supported by this server");
+      return;
+    }
     const request: PendingAuthRequest = {
       id: randomBytes(16).toString("hex"),
       clientId: client.clientId,
@@ -317,6 +333,11 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       }
       const tokens = deps.store.issueTokens({ clientId, scopes: record.scopes });
       deps.logger.info(`Issued access token for client ${clientId}`);
+      // This is potential proof an external OAuth client completed a live
+      // round trip — but only if the request itself actually arrived via
+      // the public origin, not loopback. The caller (server.ts) verifies
+      // that before recording anything as confirmed.
+      deps.onAuthorizationCodeExchanged?.(`${req.protocol}://${req.get("host") ?? ""}`);
       res.json({
         access_token: tokens.accessToken,
         token_type: "Bearer",

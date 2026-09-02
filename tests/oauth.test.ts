@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import path from "node:path";
 import { startBridge, type Bridge } from "../src/bridge/server.js";
+import { filterScopes, SUPPORTED_SCOPES } from "../src/auth/store.js";
 import { makeTmpDir, cleanup, write, isolateStateDir, pkceVerifierAndChallenge } from "./helpers.js";
 
 let root: string;
@@ -245,6 +246,22 @@ describe("authorization + token flow", () => {
     expect(response.headers.get("location")).toContain("error=invalid_request");
   });
 
+  it("rejects an authorization request whose scope names only unrecognized values", async () => {
+    const clientId = await registerClient();
+    const { challenge } = pkceVerifierAndChallenge();
+    const authorizeUrl = new URL(`${base}/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", clientId);
+    authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("code_challenge", challenge);
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    authorizeUrl.searchParams.set("scope", "unknown.foo");
+
+    const response = await fetch(authorizeUrl, { redirect: "manual" });
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("error=invalid_scope");
+  });
+
   it("rejects registration with non-https redirect uris", async () => {
     const response = await fetch(`${base}/oauth/register`, {
       method: "POST",
@@ -252,6 +269,31 @@ describe("authorization + token flow", () => {
       body: JSON.stringify({ redirect_uris: ["http://evil.example.com/cb"] }),
     });
     expect(response.status).toBe(400);
+  });
+});
+
+describe("filterScopes", () => {
+  it("defaults to every supported scope when the client asks for none at all", () => {
+    expect(filterScopes(undefined)).toEqual([...SUPPORTED_SCOPES]);
+    expect(filterScopes("")).toEqual([...SUPPORTED_SCOPES]);
+    expect(filterScopes("   ")).toEqual([...SUPPORTED_SCOPES]);
+  });
+
+  it("grants exactly the requested scopes when all are supported", () => {
+    expect(filterScopes("workspace.read git.read")).toEqual(["workspace.read", "git.read"]);
+  });
+
+  it("intersects with SUPPORTED_SCOPES when the request mixes known and unknown scopes", () => {
+    expect(filterScopes("workspace.read unknown.foo")).toEqual(["workspace.read"]);
+  });
+
+  it("never escalates to every scope when only unrecognized scopes were requested", () => {
+    // The bug this guards: an old version returned SUPPORTED_SCOPES
+    // whenever the intersection was empty, so `scope=unknown.foo` silently
+    // granted full access instead of failing. An empty result now means
+    // the caller must reject with invalid_scope.
+    expect(filterScopes("unknown.foo")).toEqual([]);
+    expect(filterScopes("unknown.foo another.bogus")).toEqual([]);
   });
 });
 

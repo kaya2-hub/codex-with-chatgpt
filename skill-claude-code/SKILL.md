@@ -230,7 +230,11 @@ themselves — this workflow does all of that.
 2. If `needsInit` is `false` and `tunnel.permanentUrlConfigured` is `true`:
    skip straight to step 5 below (Project Bootstrap) — everything is already
    set up, reuse it as-is. Do not call `imonikai init` again, do not touch
-   the tunnel or connector.
+   the tunnel or connector. (This branch's `needsInit: false` already
+   guarantees the Named Tunnel is what's actually live right now, too —
+   `tunnel.namedFallbackActive` true forces `needsInit: true`, so THIS
+   branch alone can't fire while a configured Named Tunnel is silently
+   running degraded on Quick. That state is handled separately by 2c below.)
 2b. If `needsInit` is `false` but `tunnel.permanentUrlConfigured` is
    `false`: this workspace already has a working connection, just not a
    fixed hostname yet (e.g. it was set up before a `--zone` was known).
@@ -246,12 +250,40 @@ themselves — this workflow does all of that.
    `chatgptRepair.needed` is `false` (the upgrade fell back to Quick Tunnel
    again, or nothing changed), continue straight to step 5 with the
    existing connection as-is.
-3. If `needsInit` is `true`: run
+2c. If `tunnel.namedFallbackActive` is `true` (this also makes `needsInit`
+   `true`, but check this FIRST, before step 3): a Named Tunnel is already
+   configured for this workspace, but the bridge is currently running
+   degraded on Quick — `imonikai init` is a no-op here (the one-time
+   choice was already made, and there's nothing to "upgrade" since Named
+   is already configured — see `applyTunnelChoiceOrUpgrade` in
+   `docs/imonikai-bootstrap.md`). Run
+   `c2c doctor -w <workspace> --agent claude-code --fix --json` instead —
+   it restarts the bridge and gives the already-configured Named Tunnel
+   another chance to connect (the earlier failure is often transient:
+   DNS/cert propagation, a cloudflared hiccup). Then re-run
+   `c2c imonikai status --json`:
+   - `namedFallbackActive` now `false`: repaired. The hostname didn't
+     change, so the existing ChatGPT connector should keep working as-is
+     — continue straight to step 5 (Project Bootstrap) unless
+     `chatgptRepair.needed` came back `true` from the doctor call (rare —
+     only if the address itself also changed), in which case follow
+     **Workflow: reconnect after address reclaim** first.
+   - still `true`: the underlying issue persists. Do not loop — retry
+     `doctor --fix` at most once more, then report it to the user and
+     continue to step 5 anyway with the working Quick connection; the
+     task is not blocked, just not on the intended fixed address yet.
+3. If `needsInit` is `true` and `tunnel.namedFallbackActive` is `false`
+   (first-time setup, or 2b's "authorized but never configured Named"
+   case): run
    `c2c imonikai init -w <workspace> --agent claude-code --zone <domain> --json`
-   (omit `--zone` if you don't have one yet; `--hostname <full-hostname>`
-   instead if the workspace name isn't ASCII-friendly — propose a sensible
-   one yourself, e.g. "芋煮会商事" -> `--hostname imonikai.c2c.<domain>` —
-   see `docs/imonikai-bootstrap.md` § Hostnames for non-ASCII workspace names).
+   (`--zone` must be the real Cloudflare zone apex, e.g. `example.com` —
+   never a subdomain of it; omit `--zone` if you don't have one yet.
+   `--hostname <full-hostname>` instead if the workspace name isn't
+   ASCII-friendly — propose a sensible one yourself, one label directly
+   under the apex, e.g. "芋煮会商事" -> `--hostname imonikai.<domain>` — see
+   `docs/imonikai-bootstrap.md` § Hostnames for non-ASCII workspace names
+   and `docs/troubleshooting.md`'s zone-apex warning before proposing
+   anything deeper).
    - If it asks for a Cloudflare login (first time only, this machine),
      follow it — one browser action, on the user's own machine (this uses
      the OS default browser via `cloudflared`, not your browser-automation

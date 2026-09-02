@@ -38,6 +38,16 @@ export function needsTunnelChoice(state: TunnelState): boolean {
   return state.preference === "unset" || !state.askedAt;
 }
 
+/** Separate from `needsTunnelChoice`: a workspace that already made a
+ *  one-time "quick" choice should still be eligible for a later, safe
+ *  upgrade to Named once a zone becomes available (e.g. the user adds a
+ *  Cloudflare domain after initial setup) — it must not require asking
+ *  again, and it must not require pretending the choice was never made.
+ *  Once already on Named, there's nothing to upgrade. */
+export function canUpgradeToNamed(state: TunnelState): boolean {
+  return state.preference === "quick" && !isNamedTunnelReady(state);
+}
+
 export function isNamedTunnelReady(state: TunnelState): boolean {
   return (
     state.preference === "named" &&

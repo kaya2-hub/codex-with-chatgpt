@@ -48,6 +48,23 @@ login, then keeps `c2c-<project>.your-domain.com`. To stay on the temporary
 address, say you do not have a domain. Switching later: tell Codex you want
 the stable hostname; it runs `c2c tunnel choose --mode named --zone <domain>`.
 
+**`--zone` must be the real Cloudflare zone apex** (e.g. `example.com`), not
+a subdomain of it (e.g. `c2c.example.com`). Cloudflare's default Universal
+SSL certificate for a zone normally only covers the apex and its immediate
+wildcard (`example.com` and `*.example.com`) — a hostname one level deeper
+than that (`something.c2c.example.com`, whose "zone" would be the non-apex
+`c2c.example.com`) very likely has no matching edge certificate at all.
+DNS routing still succeeds (`cloudflared tunnel route dns` creates the
+CNAME fine), so this fails silently until something actually tries an
+HTTPS request: it comes back as a bare TLS handshake failure (curl: "SSL
+routines::ssl/tls alert handshake failure", no certificate ever offered),
+not a normal HTTP error — confirmed live against a real Cloudflare zone,
+2026-09-02. If `--zone` is omitted, `imonikai init` falls back to deriving
+one by stripping `--hostname`'s leftmost label, which only lands on the
+true apex when `--hostname` itself has exactly two labels
+(`sub.example.com` -> `example.com`); for a deeper `--hostname`, pass
+`--zone` explicitly instead of relying on that fallback.
+
 ### "配对码无效/过期"
 Pairing codes are one-time and expire after ~5 minutes:
 

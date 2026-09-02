@@ -69,7 +69,7 @@ everything a Skill needs:
   "workspaceId": "...", "workspaceName": "...",
   "isNewWorkspace": true,
   "bridge": { "running": true, "port": 12345 },
-  "tunnel": { "mode": "named", "url": "https://c2c-imonikai.c2c.example.com", "permanentUrlConfigured": true, "hostname": "c2c-imonikai.c2c.example.com" },
+  "tunnel": { "mode": "named", "url": "https://c2c-imonikai.example.com", "permanentUrlConfigured": true, "hostname": "c2c-imonikai.example.com", "reachable": true, "namedFallbackActive": false },
   "connector": { "name": "Codex with ChatGPT · Imonikai", "mcpUrl": "...", "authorized": false },
   "aiContext": { "exists": false, "path": "AI_CONTEXT.md" },
   "chatgptPolicy": { "chatgptSurface": "chat", "rejectWorkSuggestion": true },
@@ -78,15 +78,32 @@ everything a Skill needs:
 ```
 
 `needsInit` means "ChatGPT has never successfully authorized against this
-workspace" (`connector.authorized` is false, i.e. no live token) — the
-signal for "this needs first-time setup." It says nothing about the
-tunnel: a workspace can be fully authorized (`needsInit: false`) while
-still running on an ephemeral Quick Tunnel
+workspace" (`connector.authorized` is false, i.e. no live usable token) —
+the signal for "this needs first-time setup." It says nothing about the
+tunnel on its own: a workspace can be fully authorized (`needsInit: false`)
+while still running on an ephemeral Quick Tunnel
 (`tunnel.permanentUrlConfigured: false`), e.g. because it was set up
 before a `--zone` was known. Treating `needsInit: false` alone as "nothing
 left to do" is wrong and leaves such a workspace stuck on Quick Tunnel
 forever — always check `tunnel.permanentUrlConfigured` too (see "The
 standard flow" above).
+
+`tunnel.mode` and `tunnel.permanentUrlConfigured` answer two DIFFERENT
+questions, and both matter: `permanentUrlConfigured` is "did we ever
+successfully configure a Named Tunnel for this workspace" (persisted,
+sticky); `mode` is "what is actually running right now, live" (`named` /
+`quick` / `none`). They can disagree: if a configured Named Tunnel fails to
+start, the bridge falls back to a working Quick Tunnel **for that run
+only** — `permanentUrlConfigured` stays `true` (nothing was un-configured),
+but `mode` correctly reports `"quick"`. `tunnel.namedFallbackActive` is
+exactly that disagreement as one boolean
+(`permanentUrlConfigured && mode === "quick"`) so a Skill doesn't have to
+compute it itself, and `needsInit` is already forced `true` whenever it's
+true — a Skill that only checks `needsInit` (as documented above) already
+gets this right automatically and does not need a separate check. Don't
+read `permanentUrlConfigured: true` alone as "this workspace's Named
+Tunnel is healthy right now" — check `mode`/`namedFallbackActive`
+(or just trust `needsInit`) for that.
 
 ## `c2c imonikai init` — make it ready, without asking anything guessable
 
@@ -97,21 +114,39 @@ c2c imonikai init -w <workspace> --agent codex|claude-code \
 ```
 
 1. Codex-only sandbox allowlist (no-op for Claude Code — see `src/config/sandbox-allow.ts`).
-2. **Only if this workspace has never made the one-time tunnel choice yet**
-   (`needsTunnelChoice()` — see `src/tunnel/state.ts`), decides it silently
-   instead of asking (this is the difference from `c2c tunnel choose`, which
-   is interactive):
-   - Zone comes from (in order): `--zone`, the remembered default zone
-     (`--set-default-zone` from an earlier call), or — if only `--hostname`
-     was given — the zone implied by stripping its leftmost label.
-   - If a zone is available: `provisionNamedTunnel()` (shared with `c2c
-     tunnel choose --mode named`) creates the tunnel, routes DNS, and
-     persists the choice. It never throws — a Cloudflare-side failure
+2. All of this decision logic lives in one place — `applyTunnelChoiceOrUpgrade()`
+   in `src/cli/index.ts` (exported, not a CLI-only inline block, so tests
+   call it directly). It never asks; it decides silently (the difference
+   from `c2c tunnel choose`, which is interactive):
+   - Zone comes from ONLY `--zone` or the remembered default zone
+     (`--set-default-zone` from an earlier call) — never guessed from
+     `--hostname`. An earlier version stripped `--hostname`'s leftmost
+     label to guess a zone; that's gone (see `docs/troubleshooting.md`'s
+     zone-apex warning for why — it produced a non-apex "zone" that
+     Cloudflare's default certificate doesn't cover, failing TLS silently
+     after DNS routing succeeded). If an explicit `--hostname` is combined
+     with a known zone, `isHostnameDirectlyUnderZone()`
+     (`src/tunnel/hostname.ts`) additionally requires the hostname be
+     exactly one label under that zone, refusing otherwise.
+   - **If this workspace has never made the one-time tunnel choice yet**
+     (`needsTunnelChoice()`): if a zone is available, `provisionNamedTunnel()`
+     (shared with `c2c tunnel choose --mode named`) creates the tunnel,
+     routes DNS, and persists the choice; if not, records "quick"
+     explicitly (never leaves the workspace stuck in "needs a choice" limbo).
+   - **Else, if the workspace already chose Quick and hasn't configured
+     Named yet** (`canUpgradeToNamed()`): if a zone is now available (it
+     wasn't at first-time setup, or is passed this run), the same
+     `provisionNamedTunnel()` call is retried as a safe upgrade — never
+     forced, never disruptive to an already-working Quick Tunnel bridge on
+     failure. A Quick user who never supplies a zone just stays on Quick
+     Tunnel indefinitely, silently, same as before this existed.
+   - **Else** (Named already configured, or nothing to do): no-op. This
+     is exactly the state a Named runtime fallback lands a workspace in —
+     see "Recovering from a Named fallback" below for why `imonikai init`
+     is the wrong tool there.
+   - `provisionNamedTunnel()` never throws — a Cloudflare-side failure
      (not logged in, network issue, etc.) is recorded as a normal "quick"
      choice with a reason, exactly like a user who chose Quick themselves.
-   - If no zone is available anywhere: records the choice as "quick"
-     explicitly (never leaves the workspace stuck in "needs a choice"
-     limbo). No domain is ever guessed.
 3. Starts (or reuses) the bridge and its tunnel — Named if the choice above
    resolved to Named, Quick otherwise. Reuses the existing connector name
    for this workspace if one is already on record.
@@ -128,10 +163,39 @@ ASCII-only fallback — ASCII names get a `c2c-<slug>` label, non-ASCII names
 fall back to `c2c-ws-<id-prefix>`, which is not a meaningful label. **The
 calling agent is an LLM and should propose a sensible `--hostname` itself**
 whenever the workspace name isn't ASCII-friendly — e.g. "芋煮会商事" ->
-`--hostname imonikai.c2c.example.com`. Pass `--zone` alongside it when
-known; if omitted, `imonikai init` derives the zone from the hostname you
-gave (stripping its leftmost label) rather than guessing a domain from
-nothing.
+`--hostname imonikai.example.com` (one label directly under the real
+Cloudflare zone apex — see the zone-apex warning in
+`docs/troubleshooting.md` § "I have a Cloudflare domain and want a stable
+hostname" before proposing anything deeper, like `imonikai.c2c.example.com`
+— that pattern has confirmed, silent TLS failures). **Always pass `--zone`
+alongside it with the true apex domain** — `imonikai init` never derives a
+zone from `--hostname`; without `--zone` (and no saved default), Named
+provisioning is simply skipped this run. An explicit `--hostname` combined
+with a known zone is still additionally checked
+(`isHostnameDirectlyUnderZone()`) to be exactly one label under it.
+
+### Recovering from a Named fallback
+
+`tunnel.namedFallbackActive` (see "is this workspace ready?" above) means a
+Named Tunnel is configured but the bridge is currently running degraded on
+Quick. **`imonikai init` cannot fix this** — walk the decision list in
+"make it ready" above: `needsTunnelChoice` is false (the choice was already
+made) and `canUpgradeToNamed` is false (Named is already configured), so
+`applyTunnelChoiceOrUpgrade()` falls through to its no-op branch. Calling
+`imonikai init` here does nothing and reports no error either — it just
+quietly returns the same degraded state.
+
+The actual repair is `attemptNamedFallbackRepair()` (`src/cli/index.ts`),
+which `c2c doctor --fix` calls automatically when it finds this exact
+state (`namedReady && info.tunnel.provider !== "cloudflare-named"`): stop
+the bridge, restart it, and see whether the fresh `CloudflaredNamedTunnel`
+connects this time — the earlier failure is often transient (DNS/cert
+propagation, a cloudflared hiccup). Both Skills' step "2c" route
+`namedFallbackActive: true` to `c2c doctor -w <workspace> --agent <a>
+--fix --json` specifically, ahead of the normal `needsInit: true` ->
+`imonikai init` step. Re-check `imonikai status` afterward rather than
+trusting doctor's own report alone — `namedFallbackActive` going back to
+`false` is the actual confirmation.
 
 ## What stays in each Skill (cannot move into the common layer)
 

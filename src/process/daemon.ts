@@ -8,15 +8,29 @@ import { Workspace } from "../workspace/manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-/** Path to the CLI entry, works from dist/ and from tsx dev runs. */
+/** Path to the CLI entry, works from dist/ and from tsx dev runs.
+ *
+ *  Must point at `cli/run.(js|ts)`, never `cli/index.(js|ts)` — since
+ *  ITERATION 3's fix for the dist/npm `bin/c2c.js` no-op regression,
+ *  `index.ts` only defines the program and exports `runCli()`; it has no
+ *  top-level auto-execution at all. `run.ts` is the one file that
+ *  unconditionally calls `runCli(process.argv)`. This exact function was
+ *  missed in that fix and still pointed at `index.(js|ts)` — spawning it
+ *  as `serve` would start a process that parses nothing and opens no
+ *  port, silently breaking every path that calls `ensureBridge()` (new
+ *  bridge spawn, bridge restart, `doctor --fix`, Named fallback repair)
+ *  the moment no live bridge is already running to reuse. `bin/c2c.js`
+ *  resolves the same `cli/run.(js|ts)` pair — see its own comment; if
+ *  that ever needs to change, this must change identically (see
+ *  tests/cli-entrypoint.test.ts for the regression coverage on both). */
 function cliEntry(): { cmd: string; args: string[] } {
-  const distEntry = path.resolve(__dirname, "..", "cli", "index.js");
+  const distEntry = path.resolve(__dirname, "..", "cli", "run.js");
   if (fs.existsSync(distEntry)) {
     return { cmd: process.execPath, args: [distEntry] };
   }
   // dev fallback: run TypeScript sources through the tsx ESM loader
   const projectRoot = path.resolve(__dirname, "..", "..");
-  const tsEntry = path.join(projectRoot, "src", "cli", "index.ts");
+  const tsEntry = path.join(projectRoot, "src", "cli", "run.ts");
   return { cmd: process.execPath, args: ["--import", "tsx/esm", tsEntry] };
 }
 

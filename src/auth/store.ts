@@ -260,6 +260,22 @@ export class AuthStore {
     return this.tokens.size;
   }
 
+  /** Unlike `tokenCount()`, this re-checks expiry live rather than trusting
+   *  the in-memory map's size — a token can be valid at server start and
+   *  silently expire while the process keeps running, since only `load()`
+   *  and `save()` prune expired entries. "authorized" must mean "there is
+   *  at least one token usable right now", not "a token object still
+   *  exists in memory". Does not by itself prove ChatGPT is using the
+   *  current public URL — only that this workspace's auth store has live
+   *  credentials. */
+  hasUsableAuthorization(): boolean {
+    const now = Date.now();
+    for (const token of this.tokens.values()) {
+      if (!token.revoked && token.expiresAt > now) return true;
+    }
+    return false;
+  }
+
   static deleteStateFile(workspaceId: string): void {
     const file = path.join(getStateDir(), "auth", `${workspaceId}.json`);
     try {
@@ -270,9 +286,14 @@ export class AuthStore {
   }
 }
 
+/** No `scope` param at all means "the client didn't ask" — default to the
+ *  full supported set, per usual OAuth practice. An explicit `scope` that
+ *  names only unrecognized values must NOT silently widen to everything —
+ *  that would let a typo or an unrelated client request escalate to full
+ *  access. Callers must treat an empty result as `invalid_scope`, not as
+ *  "fall back to default". */
 export function filterScopes(requested: string | undefined): string[] {
   if (!requested || requested.trim() === "") return [...SUPPORTED_SCOPES];
   const asked = requested.split(/[\s+]+/).filter(Boolean);
-  const granted = asked.filter((scope) => (SUPPORTED_SCOPES as readonly string[]).includes(scope));
-  return granted.length > 0 ? granted : [...SUPPORTED_SCOPES];
+  return asked.filter((scope) => (SUPPORTED_SCOPES as readonly string[]).includes(scope));
 }

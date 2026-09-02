@@ -16,6 +16,8 @@ import { Logger, nullLogger } from "../logger/index.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
 import { writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
+import { recordConnectorConfirmation } from "../config/connectorConfirmation.js";
+import { normalizePublicUrl } from "../config/endpoint.js";
 
 function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider {
   const binding = namedTunnelBinding(readTunnelState(workspaceId));
@@ -35,6 +37,11 @@ export interface BridgeOptions {
   host?: string;
   logger?: Logger;
   tunnelProvider?: TunnelProvider;
+  /** Constructs the Quick Tunnel fallback used when a Named Tunnel fails to
+   *  start (see /admin/tunnel/start). Defaults to a real
+   *  `CloudflaredQuickTunnel`; tests inject a fake so the fallback path is
+   *  exercised without spawning a real cloudflared process. */
+  quickFallbackProvider?: (logger: Logger) => TunnelProvider;
   /** Persist runtime state file (disable in tests). */
   persistRuntime?: boolean;
   authStoreFile?: string;
@@ -89,7 +96,10 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
-  const tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
+  // Mutable: a Named Tunnel that fails to start falls back to a Quick
+  // Tunnel for this run (see /admin/tunnel/start) without losing the
+  // workspace's persisted `named` preference.
+  let activeTunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
   let publicBaseUrl: string | null = null;
@@ -120,6 +130,19 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       workspaceName: workspace.name,
       getBaseUrl,
       logger,
+      onAuthorizationCodeExchanged: (requestOrigin: string) => {
+        // Only record a confirmation when the token request's OWN observed
+        // origin matches what we currently believe the public URL to be —
+        // never just because a public URL happens to be configured. A
+        // request that arrived over loopback (local admin/CLI calls,
+        // tests hitting bridge.localBaseUrl()) must not be able to confirm
+        // the public tunnel URL; that was the exact bug this fixes (an
+        // old, unrelated token/URL combination getting silently treated
+        // as proof the CURRENT desired URL is reachable).
+        if (publicBaseUrl && normalizePublicUrl(requestOrigin) === normalizePublicUrl(publicBaseUrl)) {
+          recordConnectorConfirmation(workspace.id, `${publicBaseUrl}/mcp`);
+        }
+      },
     })
   );
 
@@ -166,8 +189,9 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       workspaceRoot: workspace.root,
       port,
       publicUrl: publicBaseUrl,
-      tunnel: tunnel.status(),
+      tunnel: activeTunnel.status(),
       tokenCount: authStore.tokenCount(),
+      hasUsableAuthorization: authStore.hasUsableAuthorization(),
       pairingActive: pairing.hasActiveSession(),
       pid: process.pid,
       startedAt,
@@ -175,7 +199,8 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   });
 
   app.post("/admin/tunnel/start", adminGuard, (_req, res) => {
-    tunnel
+    const startedProvider = activeTunnel;
+    startedProvider
       .start(port)
       .then((url) => {
         publicBaseUrl = url;
@@ -184,12 +209,36 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       })
       .catch((error: Error) => {
         logger.error(`Tunnel start failed: ${error.message}`);
-        res.status(500).json({ error: "tunnel_failed", message: error.message });
+        // The doc/Skill promise is: 芋煮会 always gets at least a working
+        // Quick Tunnel. A Named Tunnel that fails to start (dead
+        // credentials, DNS not yet propagated, cloudflared edge hiccup —
+        // see docs/troubleshooting.md) must not leave the workspace with no
+        // usable connection at all. Only this one run falls back; the
+        // workspace's persisted `named` preference is untouched, so the
+        // next start attempt (or `c2c doctor --fix`) tries Named again.
+        if (startedProvider.name !== "cloudflare-named") {
+          res.status(500).json({ error: "tunnel_failed", message: error.message });
+          return;
+        }
+        logger.warn("Named tunnel failed to start; falling back to a Quick Tunnel for this run.");
+        const quick = (opts.quickFallbackProvider ?? ((l: Logger) => new CloudflaredQuickTunnel(l)))(logger);
+        quick
+          .start(port)
+          .then((url) => {
+            activeTunnel = quick;
+            publicBaseUrl = url;
+            persistRuntime();
+            res.json({ url, fallback: true, namedError: error.message });
+          })
+          .catch((fallbackError: Error) => {
+            logger.error(`Quick Tunnel fallback also failed: ${fallbackError.message}`);
+            res.status(500).json({ error: "tunnel_failed", message: error.message });
+          });
       });
   });
 
   app.post("/admin/tunnel/stop", adminGuard, (_req, res) => {
-    void tunnel.stop().then(() => {
+    void activeTunnel.stop().then(() => {
       publicBaseUrl = null;
       persistRuntime();
       res.json({ stopped: true });
@@ -235,7 +284,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const shutdown = async (): Promise<void> => {
     if (closed) return;
     closed = true;
-    await tunnel.stop().catch(() => undefined);
+    await activeTunnel.stop().catch(() => undefined);
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (opts.persistRuntime !== false) clearRuntimeState(workspace.id);
     logger.info("Bridge stopped");
@@ -248,7 +297,9 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     adminToken,
     authStore,
     pairing,
-    tunnel,
+    get tunnel() {
+      return activeTunnel;
+    },
     getPublicBaseUrl: () => publicBaseUrl,
     localBaseUrl: () => `http://${host}:${port}`,
     close: shutdown,

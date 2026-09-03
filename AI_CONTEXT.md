@@ -13,27 +13,24 @@
 `d4dbf5f`）。その上に「芋煮会」ゼロタッチブートストラップ機能
 (`c2c imonikai status`/`init`) を、upstream 側の Named Tunnel / セッション実装
 （`src/tunnel/state.ts`, `named-provision.ts`, `cloudflared-named.ts` など）の
-上に作り直してコミット済み（`b01eebf`）。直近のコミットは `88092f3`
-（独立したChatGPT監査による2件の修正）。
+上に作り直してコミット済み（`b01eebf`）。
 
-working tree は **dirty**（`c2c_full_audit_fix` の実装が未コミット —
-変更対象: `src/auth/oauth.ts`, `src/auth/store.ts`, `src/bridge/server.ts`,
-`src/cli/index.ts`, `src/process/daemon.ts`, `src/tunnel/hostname.ts`,
-`src/tunnel/named-provision.ts`, `src/tunnel/state.ts`, `package.json`,
-`src/config/connectorConfirmation.ts`（新規）, `src/cli/run.ts`（新規、CLIの
-実エントリポイント）, `bin/c2c.js`, `docs/protocol.md`,
-`docs/imonikai-bootstrap.md`, `docs/troubleshooting.md`, `skill/SKILL.md`,
-`skill-claude-code/SKILL.md`, および対応テスト）。
+**working tree は dirty（2026-09-03時点）**: `src/session/state.ts`・
+`src/session/kokuban.ts`・`src/cli/index.ts`・`tests/kokuban.test.ts`が
+未コミット（Kokuban `holderAfter`/`stopReason`/`summary`拡張、下記参照）。
+直近のコミットは新しい順に:
+`95518ea`（dead bridge由来のstale runtime state自動修復）→
+`3b5bbcd`（Kokuban黒板へのsession-set連携フック追加）→
+`4b13e33`（`c2c_full_audit_fix`、独立ChatGPT監査12項目の修正）→
+`88092f3`（同監査の先行2件）。
 **この行を含め、記載内容は都度の `git status`/`git log` で必ず裏取りしてから
 信頼すること — 過去、working tree clean/テスト153件という記述が実態と
 2日以上ズレたまま放置されていたことが2026-09-02の監査で判明している。**
 
-テストは `npx vitest run`（デフォルト、外部ネットワーク不要）で200件green
-+ 1件skip、typecheck・buildともclean（`tests/`はtsconfigのexclude対象で、
-`tests/mcp-integration.test.ts`/`tests/pairing.test.ts`に本件と無関係な
-既存の型エラーが残っている — 実行時はgreen）。実cloudflared/実ネットワーク
-依存の1テストは`C2C_TEST_NETWORK=1 npx vitest run`でのみ動くopt-in smoke
-testとして分離済み。
+テストは `npx vitest run`（デフォルト、外部ネットワーク不要）で230件green
++ 1件skip、typecheck・buildともclean（未コミットのKokuban拡張込み）。
+実cloudflared/実ネットワーク依存の1テストは`C2C_TEST_NETWORK=1 npx vitest run`
+でのみ動くopt-in smoke testとして分離済み。
 
 **CLIの実エントリポイントは `src/cli/run.ts`（コンパイル後
 `dist/cli/run.js`）のみ — `src/cli/index.ts` は `program`/`runCli()`を
@@ -58,9 +55,62 @@ CLIエントリポイント分離に伴う取り残し（`daemon.ts`・`package.
 「過剰実装チェック」と「共通前提変更時の波及先チェック」の2項目を
 今回の教訓として追加した（Rules 10-11）。
 
-**次のステップ（未実施）**: コミット、ChatGPT側の旧connector整理、
-c2c-dev自身のBridge再起動は、この監査完了を受けて別途ユーザーの指示で
-行う。
+この監査分はコミット済み（`4b13e33`）。ChatGPT側connectorの再作成・
+c2c-dev自身のBridge再起動も、この監査完了時点で既に実施済み。
+
+**Kokuban（黒板）連携フック（2026-09-02、コミット `3b5bbcd`）**: bluecabi-personal-core
+に実装したKokuban v0（Activity Event Log + API）へ、既存C2Cの状態確定地点
+（このrepoの`c2c session set`コマンド）から自動的に状態遷移を報告する
+opt-inフックを追加。`.c2c.json`に`kokuban`ブロックがあるworkspaceだけ動作し、
+それ以外のworkspaceは完全に無変更（空workspaceで実地確認済み）。bearer tokenは
+env var名（既定`KOKUBAN_WRITE_TOKEN`）でのみ参照し、値はログ・出力に一切含めない。
+Kokuban側でのC2C独立レビュー（`c2c_kbp1`、bluecabi-personal-core側）で
+DONE承認済み。詳細: `src/session/kokuban.ts`。
+
+**Kokuban holderAfter/stopReason/summary拡張（2026-09-03、C2C `c2c_rev01`、
+未コミット）**: 上記フックが従来送っていなかった`holderAfter`/`stopReason`/
+`summary`をKokubanへ配線。`src/session/state.ts`の`WaitingFor`に`CONDITION`/
+`EXTERNAL`を追加（BLOCKED時に「内部条件待ち」か「外部待ち」かを明示できる
+既存パターンの拡張）。新設`deriveKokubanExtras()`（`src/session/kokuban.ts`）が
+`waitingFor→holderAfter`を固定table（`USER→human`,
+`GPT_PLAN`/`GPT_REVIEW→chatgpt`, `CONDITION→condition`,
+`EXTERNAL→external`）でのみマップし、`knownIssues→stopReason`は直代入、
+`summary`は`completedSubtasks`+`nextExpectedStep`+`knownIssues`を
+（blank除外の上）機械的に連結するだけ — 自然言語推論は一切なし。
+`reportKokubanTransition()`側で`holderAfter`/`stopReason`はBLOCKED以外に
+絶対漏れないよう二重にguard。C2C独立レビュー2 iterationでDONE承認
+（1回目でwhitespace-only blank filtering不備を指摘・修正）。
+
+**Dead bridge由来のstale runtime state自動修復（2026-09-03、コミット `95518ea`）**:
+実際に発生した接続障害（workspace Aのbridgeが異常終了→OSがAの旧portを
+別workspace Bの新しいbridgeへ再割当→Aの古いstate fileが依然その port を
+指したまま→health probeはBの健全な応答を返すため誤ったworkspaceIdとして
+検知され、安全側で自動修復を拒否し続けていた）の根本修正。
+
+- `findBridgeObservation`（`src/bridge/runtime.ts`）が新状態`"stale"`を判定:
+  「portは別の生きたworkspaceとして応答」かつ「自分のpidは確認済みで死亡」の
+  場合のみ。自分のpidがまだ生きている場合は従来通り`"unknown"`のまま拒否
+  （PID再利用による誤判定を避けるための安全側判断）。
+- `ensureBridge`/`doctor --fix`/`start`は`stale`を`stopped`と同様に自動修復対象
+  として扱う。**別workspaceの生きたbridgeには一切触れない**（自分の古い
+  pointerファイルを破棄して新規spawnするだけ、port選択は既存のfallback
+  ロジックに委ねる）。
+- `stopBridge`の既存の危険なバグ（mismatch/probe失敗時に無条件で
+  `process.kill(runtime.pid)`していた — PID再利用時に無関係なプロセスを
+  誤って殺すリスクがあった）も同時に修正。生存確認済みのPIDにのみsignalを送る。
+- `RuntimeState.generation`（起動毎の新規random値、`/health`にも反映）を
+  監査用に追加 — ただし安全性そのものを担保するのはPID生存確認であり、
+  generationはあくまで「reclaim後は別インスタンスである」ことを証明する
+  補助的な観測用フィールド。
+- C2C独立レビュー（`c2c_stale1`、c2c-dev自身のworkspaceで実施）2ラウンドで
+  DONE承認済み。1ラウンド目でChatGPTが実際の見落とし（`c2c status`コマンドが
+  `findBridgeObservation`の別の呼び出し箇所として存在し、staleを未対応の
+  まま素通り→stale状態のworkspaceに対して別workspaceへ実際にadmin
+  リクエストを送ってしまうバグ）を発見、修正して再レビューでDONE。
+- テスト216件green（新規5件、うち2件は実subprocessを使う統合テスト）・
+  typecheck green。実際の障害シナリオを実subprocess 2つで再現
+  （Aを`SIGKILL`→AのstateをBの生きているportを指すよう改竄→`doctor --fix`）
+  し、Aが新portへ安全に再生成されBは終始無傷であることを手動でも確認済み。
 
 以前、別ディレクトリ `G:\マイドライブ\Claude_Code\codex-with-chatgpt` を
 正本として作業していたが、そちらの git が Google Drive 起因で壊れて
@@ -75,12 +125,24 @@ upstream から 15 コミット遅れていたことが判明し、このディ�
 - docs/protocol.md（C2C プロトコル）
 
 ## 今回通常読む資料
-- git log（直近のコミット履歴、特に `d4dbf5f` マージコミットの中身）
+- git log（直近のコミット履歴、特に `95518ea`/`3b5bbcd`/`4b13e33` の中身）
 - git status / git diff（未コミット差分がないか）
+- src/bridge/runtime.ts（`findBridgeObservation`、healthy/stopped/stale/unknownの判定）
+- src/process/daemon.ts（`ensureBridge`/`stopBridge`）
+- src/session/kokuban.ts（Kokuban連携フック）
 - src/cli/index.ts の imonikai 関連コード
 - skill/SKILL.md, skill-claude-code/SKILL.md
 
 ## 重要な確定事項
+
+- **stale bridge state（dead pid + 別workspaceによるport再利用）は自動修復可能、
+  ただし別workspaceの生きたbridgeには絶対に触れない**（2026-09-03、`95518ea`）。
+  安全性を担保しているのは「自分の記録したpidが確認済みで死亡している」ことのみ
+  — pidがまだ生きている場合は`"unknown"`のまま常に拒否する。この判定を緩めたり、
+  `findBridgeObservation`の新しい呼び出し元を追加する際は、必ず
+  healthy/stopped/stale/unknownの4状態すべてを網羅すること（`c2c status`が
+  一度これを見落とし、stale状態のworkspaceに対して別workspaceへ実際にadmin
+  requestを送るバグになった実例あり）。
 
 - `C:\Users\KAYA\c2c-dev\codex-with-chatgpt` が唯一の正式な作業拠点。
   `G:\マイドライブ\Claude_Code\codex-with-chatgpt` は旧拠点で、今後の作業には

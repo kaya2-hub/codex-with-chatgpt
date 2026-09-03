@@ -65,7 +65,7 @@ import {
 } from "../session/state.js";
 import { appendExecutionRecord } from "../execution/records.js";
 import { saveExecutionOutput } from "../execution/output.js";
-import { reportKokubanTransition } from "../session/kokuban.js";
+import { deriveKokubanExtras, reportKokubanTransition } from "../session/kokuban.js";
 
 const program = new Command();
 
@@ -981,7 +981,7 @@ session
   .option("--project-url <url>", "ChatGPT Project collection URL (…/g/g-p-…/project)")
   .option("--connector-name <name>", "exact connector title for this workspace")
   .option("--protocol-state <state>", "checkpoint protocol state, e.g. EXECUTED_SENT")
-  .option("--waiting-for <who>", "none | GPT_PLAN | GPT_REVIEW | USER")
+  .option("--waiting-for <who>", "none | GPT_PLAN | GPT_REVIEW | USER | CONDITION | EXTERNAL")
   .option("--goal <text>", "original task goal for resume / HANDOFF")
   .option("--completed-subtasks <text>")
   .option("--known-issues <text>")
@@ -1057,11 +1057,15 @@ session
       // never call reportKokubanTransition at all -- zero behavior change.
       const kokubanConfig = workspace.projectConfig.kokuban;
       if (kokubanConfig && opts.state) {
+        const extras = deriveKokubanExtras(saved.checkpoint);
         const result = await reportKokubanTransition({
           config: kokubanConfig,
           state: opts.state,
           taskId: saved.taskId,
           iteration: saved.iteration,
+          holderAfter: extras.holderAfter,
+          stopReason: extras.stopReason,
+          summary: extras.summary,
         });
         if (result.attempted) {
           if (result.ok) {

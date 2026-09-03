@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { reportKokubanTransition } from "../src/session/kokuban.js";
+import { deriveKokubanExtras, reportKokubanTransition } from "../src/session/kokuban.js";
 import type { KokubanConfig } from "../src/workspace/manager.js";
+import type { TaskCheckpoint } from "../src/session/state.js";
 
 const BASE_CONFIG: KokubanConfig = { projectKey: "bluecabi-personal-core" };
 
@@ -114,5 +115,124 @@ describe("reportKokubanTransition", () => {
     expect(result.attempted).toBe(true);
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("ENOTFOUND");
+  });
+
+  it("includes holderAfter/stopReason in the body for a BLOCKED report", async () => {
+    process.env.KOKUBAN_WRITE_TOKEN = "t";
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(JSON.stringify({ duplicate: false }), { status: 201 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await reportKokubanTransition({
+      config: BASE_CONFIG,
+      state: "BLOCKED",
+      taskId: "c2c_x",
+      iteration: 0,
+      holderAfter: "human",
+      stopReason: "awaiting review",
+    });
+
+    const [, requestInit] = fetchSpy.mock.calls[0]!;
+    const body = JSON.parse(requestInit.body as string);
+    expect(body.holderAfter).toBe("human");
+    expect(body.stopReason).toBe("awaiting review");
+  });
+
+  it("drops holderAfter/stopReason for a non-BLOCKED report instead of sending a request Kokuban would reject", async () => {
+    process.env.KOKUBAN_WRITE_TOKEN = "t";
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(JSON.stringify({ duplicate: false }), { status: 201 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // Simulates a stale/leftover checkpoint value from a prior BLOCKED
+    // iteration still being derived while this report is actually PLAN.
+    await reportKokubanTransition({
+      config: BASE_CONFIG,
+      state: "PLAN",
+      taskId: "c2c_x",
+      iteration: 0,
+      holderAfter: "human",
+      stopReason: "awaiting review",
+    });
+
+    const [, requestInit] = fetchSpy.mock.calls[0]!;
+    const body = JSON.parse(requestInit.body as string);
+    expect(body.holderAfter).toBeUndefined();
+    expect(body.stopReason).toBeUndefined();
+  });
+
+  it("includes summary for any state, including non-BLOCKED", async () => {
+    process.env.KOKUBAN_WRITE_TOKEN = "t";
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(JSON.stringify({ duplicate: false }), { status: 201 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await reportKokubanTransition({ config: BASE_CONFIG, state: "EXECUTED", taskId: "c2c_x", iteration: 0, summary: "Migration done.\nNext: deploy." });
+
+    const [, requestInit] = fetchSpy.mock.calls[0]!;
+    const body = JSON.parse(requestInit.body as string);
+    expect(body.summary).toBe("Migration done.\nNext: deploy.");
+  });
+
+  it("omits summary from the body when blank/absent", async () => {
+    process.env.KOKUBAN_WRITE_TOKEN = "t";
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(JSON.stringify({ duplicate: false }), { status: 201 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await reportKokubanTransition({ config: BASE_CONFIG, state: "EXECUTED", taskId: "c2c_x", iteration: 0, summary: "   " });
+
+    const [, requestInit] = fetchSpy.mock.calls[0]!;
+    const body = JSON.parse(requestInit.body as string);
+    expect(body.summary).toBeUndefined();
+  });
+});
+
+function checkpoint(overrides: Partial<TaskCheckpoint>): TaskCheckpoint {
+  return { taskId: "c2c_x", iteration: 0, protocolState: "BLOCKED", waitingFor: "none", updatedAt: new Date().toISOString(), ...overrides };
+}
+
+describe("deriveKokubanExtras", () => {
+  it("returns nothing when there is no checkpoint yet", () => {
+    expect(deriveKokubanExtras(undefined)).toEqual({});
+  });
+
+  it("maps waitingFor=USER to holderAfter=human", () => {
+    expect(deriveKokubanExtras(checkpoint({ waitingFor: "USER" })).holderAfter).toBe("human");
+  });
+
+  it("maps waitingFor=GPT_PLAN and GPT_REVIEW to holderAfter=chatgpt", () => {
+    expect(deriveKokubanExtras(checkpoint({ waitingFor: "GPT_PLAN" })).holderAfter).toBe("chatgpt");
+    expect(deriveKokubanExtras(checkpoint({ waitingFor: "GPT_REVIEW" })).holderAfter).toBe("chatgpt");
+  });
+
+  it("maps waitingFor=CONDITION and EXTERNAL to their own holderAfter values", () => {
+    expect(deriveKokubanExtras(checkpoint({ waitingFor: "CONDITION" })).holderAfter).toBe("condition");
+    expect(deriveKokubanExtras(checkpoint({ waitingFor: "EXTERNAL" })).holderAfter).toBe("external");
+  });
+
+  it("leaves holderAfter undefined for waitingFor=none", () => {
+    expect(deriveKokubanExtras(checkpoint({ waitingFor: "none" })).holderAfter).toBeUndefined();
+  });
+
+  it("maps knownIssues to stopReason verbatim", () => {
+    expect(deriveKokubanExtras(checkpoint({ knownIssues: "flaky test on CI" })).stopReason).toBe("flaky test on CI");
+  });
+
+  it("builds summary by mechanically joining completedSubtasks, nextExpectedStep, and knownIssues in that order", () => {
+    const extras = deriveKokubanExtras(checkpoint({ completedSubtasks: "did A", nextExpectedStep: "do B", knownIssues: "watch out for C" }));
+    expect(extras.summary).toBe("did A\ndo B\nwatch out for C");
+  });
+
+  it("skips missing fields rather than leaving blank lines in the summary", () => {
+    const extras = deriveKokubanExtras(checkpoint({ completedSubtasks: "did A" }));
+    expect(extras.summary).toBe("did A");
+  });
+
+  it("skips a whitespace-only field too, not just missing/empty ones", () => {
+    const extras = deriveKokubanExtras(
+      checkpoint({ completedSubtasks: "did A", nextExpectedStep: "   ", knownIssues: "issue C" }),
+    );
+    expect(extras.summary).toBe("did A\nissue C");
+  });
+
+  it("leaves summary undefined when the checkpoint has none of the three fields", () => {
+    expect(deriveKokubanExtras(checkpoint({})).summary).toBeUndefined();
   });
 });

@@ -1,6 +1,7 @@
 import type { EffectiveKokubanConfig } from "./kokuban-config.js";
 import type { TaskCheckpoint, WaitingFor } from "./state.js";
 import { readSession } from "./state.js";
+import { resolveKokubanToken } from "./kokuban-secret.js";
 import {
   commitOutboxEvent,
   computeIdempotencyKey,
@@ -13,7 +14,7 @@ import {
 } from "./kokuban-outbox.js";
 
 const DEFAULT_API_BASE_URL = "https://core.bluecabi.net";
-const DEFAULT_TOKEN_ENV_VAR = "KOKUBAN_WRITE_TOKEN";
+export const DEFAULT_TOKEN_ENV_VAR = "KOKUBAN_WRITE_TOKEN";
 const DEFAULT_ACTOR = "coding_agent";
 
 /** waitingFor -> Kokuban holderAfter, for BLOCKED reports only. Deliberately a fixed table, not inference. */
@@ -68,6 +69,13 @@ export interface KokubanReportInput {
   state: string;
   taskId: string | undefined;
   iteration: number | undefined;
+  /**
+   * Enables the persisted-secret fallback (see resolveKokubanToken in
+   * kokuban-secret.ts) when the token env var isn't set. Optional so
+   * direct/legacy callers that don't pass one keep the exact old
+   * "env var or nothing" behavior, unchanged.
+   */
+  workspaceId?: string;
   /**
    * Only ever forwarded when state is BLOCKED (see the gate below) --
    * Kokuban's own C2C adapter rejects holderAfter/stopReason outright for
@@ -131,12 +139,20 @@ function buildKokubanRequestBody(input: BuildBodyInput): string {
 async function postKokubanRequestBody(
   apiBaseUrl: string,
   tokenEnvVar: string,
-  rawBody: string
+  rawBody: string,
+  workspaceId?: string
 ): Promise<KokubanReportResult> {
-  const token = process.env[tokenEnvVar];
-  if (!token) {
-    return { attempted: true, ok: false, detail: `${tokenEnvVar} is not set` };
+  const resolved = resolveKokubanToken(workspaceId, tokenEnvVar);
+  if (!resolved) {
+    return {
+      attempted: true,
+      ok: false,
+      detail: workspaceId
+        ? `${tokenEnvVar} is not set and no persisted Kokuban token found for this workspace`
+        : `${tokenEnvVar} is not set`,
+    };
   }
+  const token = resolved.token;
   try {
     const res = await fetch(`${apiBaseUrl}/v1/kokuban/c2c-events`, {
       method: "POST",
@@ -160,9 +176,11 @@ async function postKokubanRequestBody(
  * Kokuban-enabled workspace's `session set` goes through, so no
  * per-workspace producer gets invented. Never throws: `session set`'s real
  * job (recording the ChatGPT chat pointer) must succeed independently of
- * whether Kokuban is reachable. The bearer token is read from an env var by
- * name only -- its value is never included in the returned detail, logged,
- * or sent anywhere but the Authorization header of this one request.
+ * whether Kokuban is reachable. The bearer token comes from `resolveKokubanToken()`
+ * (kokuban-secret.ts) -- the env var named by `config.tokenEnvVar`, or (only
+ * when `input.workspaceId` is passed) the persisted per-workspace secret --
+ * and its value is never included in the returned detail, logged, or sent
+ * anywhere but the Authorization header of this one request.
  */
 export async function reportKokubanTransition(input: KokubanReportInput): Promise<KokubanReportResult> {
   const { config, state, taskId, iteration } = input;
@@ -190,7 +208,7 @@ export async function reportKokubanTransition(input: KokubanReportInput): Promis
     stopReason: input.stopReason,
     summary: input.summary?.trim() || undefined,
   });
-  return postKokubanRequestBody(apiBaseUrl, tokenEnvVar, body);
+  return postKokubanRequestBody(apiBaseUrl, tokenEnvVar, body, input.workspaceId);
 }
 
 // ---------------------------------------------------------------------
@@ -309,7 +327,7 @@ export function prepareKokubanTransition(input: PrepareKokubanTransitionInput): 
  * reconciliation pass.
  */
 export async function sendAndDiscardKokubanEvent(workspaceId: string, event: KokubanCanonicalEvent): Promise<KokubanReportResult> {
-  const result = await postKokubanRequestBody(event.apiBaseUrl, event.tokenEnvVar, event.requestBody);
+  const result = await postKokubanRequestBody(event.apiBaseUrl, event.tokenEnvVar, event.requestBody, workspaceId);
   if (result.ok) {
     await runUnderKokubanLock(workspaceId, () => {
       const current = readOutboxEvent(workspaceId, event.idempotencyKey);

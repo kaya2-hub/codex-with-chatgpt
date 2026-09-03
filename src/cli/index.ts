@@ -69,12 +69,14 @@ import {
 import { appendExecutionRecord } from "../execution/records.js";
 import { saveExecutionOutput } from "../execution/output.js";
 import {
+  DEFAULT_TOKEN_ENV_VAR,
   deriveKokubanExtras,
   prepareKokubanTransition,
   reconcileKokubanOutboxLocally,
   sendKokubanEventsInOrder,
 } from "../session/kokuban.js";
 import { resolveEffectiveKokubanConfig } from "../session/kokuban-config.js";
+import { deleteKokubanSecret, resolveKokubanToken, saveKokubanSecret } from "../session/kokuban-secret.js";
 import { commitOutboxEvent, runUnderKokubanLock, type KokubanCanonicalEvent } from "../session/kokuban-outbox.js";
 
 const program = new Command();
@@ -87,6 +89,69 @@ const cross = (msg: string): void => say(`✗ ${msg}`);
 
 function resolveWorkspace(option?: string): string {
   return path.resolve(option ?? process.cwd());
+}
+
+/**
+ * Reads one secret value from stdin without it ever appearing in argv/shell
+ * history (`c2c kokuban-token set`'s only input path) -- see the CLI
+ * command's own doc comment. Two modes:
+ *  - Piped (not a TTY, e.g. `echo "$TOKEN" | c2c kokuban-token set`): reads
+ *    everything written to stdin and trims it.
+ *  - Interactive (a real TTY): prompts, reads raw keystrokes, echoes `*` per
+ *    character instead of the character itself (Backspace/Delete removes
+ *    one), and resolves on Enter. Ctrl-C rejects with a cancellation error
+ *    rather than silently returning a partial value.
+ * Either way, the returned string never appears anywhere else -- not
+ * echoed back, not logged.
+ */
+function readSecretFromStdin(promptText: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!process.stdin.isTTY) {
+      let data = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk) => (data += chunk));
+      process.stdin.on("end", () => resolve(data.trim()));
+      process.stdin.on("error", reject);
+      return;
+    }
+    process.stdout.write(promptText);
+    const stdin = process.stdin;
+    stdin.resume();
+    stdin.setRawMode(true);
+    stdin.setEncoding("utf8");
+    let value = "";
+    const onData = (char: string) => {
+      switch (char) {
+        case "\n":
+        case "\r":
+        case "\u0004": // Ctrl-D
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.removeListener("data", onData);
+          process.stdout.write("\n");
+          resolve(value);
+          break;
+        case "\u0003": // Ctrl-C
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.removeListener("data", onData);
+          process.stdout.write("\n");
+          reject(new Error("cancelled"));
+          break;
+        case "\u007f": // Backspace
+        case "\b":
+          if (value.length > 0) {
+            value = value.slice(0, -1);
+            process.stdout.write("\b \b");
+          }
+          break;
+        default:
+          value += char;
+          process.stdout.write("*");
+      }
+    };
+    stdin.on("data", onData);
+  });
 }
 
 /** Local harness output only. Never pasted into ChatGPT. */
@@ -1383,6 +1448,92 @@ session
     // unconfirmed/failed send (independent review, fourth round) -- see
     // sendKokubanEventsInOrder's doc comment in kokuban.ts.
     await sendKokubanEventsInOrder(workspace.id, reconciledToSend);
+  });
+
+const kokubanTokenCmd = program
+  .command("kokuban-token")
+  .description(
+    "Manage a persisted Kokuban write token for a workspace, so KOKUBAN_WRITE_TOKEN doesn't need to be set in every new terminal / after every reboot"
+  );
+
+kokubanTokenCmd
+  .command("status", { isDefault: true })
+  .description("Show whether a Kokuban token is currently available for this workspace, and where it comes from")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; json: boolean }) => {
+    const workspace = new Workspace(resolveWorkspace(opts.workspace));
+    const kokubanConfig = resolveEffectiveKokubanConfig(workspace);
+    const tokenEnvVar = kokubanConfig?.tokenEnvVar?.trim() || DEFAULT_TOKEN_ENV_VAR;
+    const resolved = resolveKokubanToken(workspace.id, tokenEnvVar);
+    if (opts.json) {
+      say(JSON.stringify({ ok: true, kokubanEnabled: kokubanConfig !== null, tokenEnvVar, source: resolved?.source ?? "none" }));
+      return;
+    }
+    if (!kokubanConfig) {
+      say('此 workspace 已通过 .c2c.json 的 "kokuban": { "enabled": false } 显式关闭 Kokuban。');
+      return;
+    }
+    if (resolved?.source === "env") check(`Kokuban token 可用（来自环境变量 ${tokenEnvVar}）`);
+    else if (resolved?.source === "persisted") check("Kokuban token 可用（来自本机持久化存储）");
+    else cross(`Kokuban token 不可用。运行 "c2c kokuban-token set" 注册一个，或设置环境变量 ${tokenEnvVar}。`);
+  });
+
+kokubanTokenCmd
+  .command("set")
+  .description(
+    'Register this workspace\'s Kokuban write token, read from stdin (never from a --flag, to keep it out of shell history). Interactive: prompts and masks input. Piped: `echo "$TOKEN" | c2c kokuban-token set`.'
+  )
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { workspace?: string; json: boolean }) => {
+    const workspace = new Workspace(resolveWorkspace(opts.workspace));
+    let token: string;
+    try {
+      token = await readSecretFromStdin("Kokuban write token: ");
+    } catch (error) {
+      handleCliError(error, opts.json);
+      return;
+    }
+    if (!token.trim()) {
+      handleCliError(new Error("no token provided"), opts.json);
+      return;
+    }
+    const result = saveKokubanSecret(workspace.id, token);
+    if (opts.json) {
+      say(JSON.stringify(result));
+      return;
+    }
+    if (!result.ok) {
+      cross(`Kokuban token 保存失败：${result.error}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (result.encoding === "plaintext") {
+      say("⚠ 当前平台无法使用 Windows DPAPI 加密，token 将以仅 0o600 文件权限保护的明文保存（保护强度弱于 Windows）。");
+    }
+    check("已安全保存 Kokuban token（仅当前用户 / 当前 workspace 可用，绝不写入 .c2c.json）。");
+  });
+
+kokubanTokenCmd
+  .command("revoke")
+  .description("Remove the persisted Kokuban write token for this workspace")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; json: boolean }) => {
+    const workspace = new Workspace(resolveWorkspace(opts.workspace));
+    const result = deleteKokubanSecret(workspace.id);
+    if (opts.json) {
+      say(JSON.stringify(result));
+      return;
+    }
+    if (!result.ok) {
+      cross(`Kokuban token 删除失败：${result.error}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (!result.existed) say("此 workspace 未保存 Kokuban token。");
+    else check("已删除已保存的 Kokuban token。");
   });
 
 const prefsCmd = program

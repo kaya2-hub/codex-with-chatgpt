@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { findDuplicateCheckoutWarning, recordWorkspaceGitIdentity, type DuplicateCheckoutWarning } from "../workspace/identity.js";
 import { startBridge } from "../bridge/server.js";
 import { findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
 import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
@@ -475,6 +476,29 @@ program
       report.workspace = { ok: false, detail: (error as Error).message };
     }
 
+    // P2-6: purely observational -- never changes workspaceId, never touches
+    // another workspace's process/bridge/tunnel (only reads its own small
+    // identity file, which every workspace writes about itself the same way
+    // it already writes endpoints/*.json or connector-confirmations/*.json).
+    // null whenever the git remote can't be read cleanly; never guessed.
+    // Deliberately its OWN try/catch, separate from workspace construction
+    // above: independent review (iteration 7) found that sharing one
+    // try/catch let an identity-persistence failure overwrite an
+    // already-successful `report.workspace: {ok:true}` with `{ok:false}` --
+    // this optional feature failing must never look like the workspace
+    // itself failing to resolve. (identity.ts's own functions are already
+    // fail-soft and never throw; this is defense in depth, not the only
+    // guard.)
+    let duplicateCheckoutWarning: DuplicateCheckoutWarning | null = null;
+    if (workspace) {
+      try {
+        const identity = recordWorkspaceGitIdentity(workspace.id, workspace.root);
+        duplicateCheckoutWarning = findDuplicateCheckoutWarning(identity);
+      } catch {
+        duplicateCheckoutWarning = null;
+      }
+    }
+
     // Bridge
     let runtime: RuntimeState | null = null;
     let bridgeUnknown = false;
@@ -832,6 +856,7 @@ program
           versionInfo,
           destructiveConnectorRepairAuthorized,
           destructiveConnectorRepairNote,
+          duplicateCheckoutWarning,
         })
       );
       return;
@@ -866,6 +891,13 @@ program
       say(
         `· 运行中 Bridge 版本与当前代码不一致（v${versionInfo.runtimeVersion} vs v${versionInfo.currentVersion}），建议 c2c restart`
       );
+    }
+    if (duplicateCheckoutWarning) {
+      say(
+        `⚠ 检测到同一 Git 仓库（${duplicateCheckoutWarning.gitRemote}）存在于另外 ${duplicateCheckoutWarning.otherWorkspaces.length} 个 workspace：` +
+          duplicateCheckoutWarning.otherWorkspaces.map((w) => w.root).join("、")
+      );
+      say("  各 workspace 的 Bridge/Tunnel/Connector 完全独立，不会自动合并；仅供参考。");
     }
     say("");
     if (namedRepair.needed && namedRepair.userMessage) {

@@ -80,12 +80,17 @@ whatever data it needs by itself.
    from chatgpt.com and click through menus.
 9. **Doctor gate.** After `c2c doctor -w <workspace> --agent codex --json`, do not
    `goto` ChatGPT and do not send `[C2C]` until local is green — except the
-   reconnect settings pages when `chatgptRepair.needed` is true. Not green:
+   reconnect settings pages when `chatgptRepair.needed` is true AND
+   `chatgptRepair.reason === "address_reclaimed"` (the only case that
+   legitimately needs those pages — see the destructive-authorization
+   paragraph below for every other case). Not green:
    - `report.bridge.ok` is not true
    - `report.mcp.ok` is not true (unauthenticated local `/mcp` must be 401)
    - sandbox / state-dir write failed (EPERM)
    - this workspace used to have a public URL and the tunnel is down
-   - `chatgptRepair.needed` is true (fix the connector first, then doctor again)
+   - `chatgptRepair.needed` is true (stay blocked; see the
+     destructive-authorization paragraph below before taking ANY action —
+     do not "fix the connector" on this bullet alone)
    - `namedRepair.needed` is true (user must login to Cloudflare, then doctor again.
      Do not Delete the ChatGPT connector — the address did not change)
    - `report.bridge` says 状态无法确认: the local bridge may still be running.
@@ -93,6 +98,29 @@ whatever data it needs by itself.
      `chatgptRepair`. Wait and run doctor again.
    A ChatGPT-side 401 after a sent message is different: repair then, do not
    treat it as permission to skip this gate next time.
+
+   **Destructive connector repair authorization (connector reliability
+   hardening, ITERATION 1).** `chatgptRepair.needed` being true is a
+   non-destructive diagnostic/recommendation only — it does NOT by itself
+   authorize deleting/recreating the connector or re-running OAuth. The one
+   existing exception is the narrow, already-deterministic case
+   `chatgptRepair.reason === "address_reclaimed"` (this workspace's own local
+   public address genuinely changed) — that case alone still drives
+   **Workflow: reconnect after address reclaim** exactly as before. For
+   every other case — in particular `chatgptRepair.needed` true with
+   `reason` absent, i.e. only `connectorRepairPending` — doctor's JSON also
+   carries a separate `destructiveConnectorRepairAuthorized` boolean. It is
+   always `false` in this version: C2C cannot observe ChatGPT's own
+   connector state, so no local inference may authorize a destructive fix.
+   Never delete/recreate the connector or re-run OAuth for any reason other
+   than the `address_reclaimed` exception above unless this flag is `true`.
+   When it is `false` and something still looks broken, report what doctor
+   found — including `remote.connectorState: "unconfirmed"` (C2C never
+   guesses disabled/expired/etc from local state alone; if it cannot
+   observe something, say "unconfirmed", not a specific guessed cause) —
+   and either wait for the user's own explicit go-ahead before doing
+   anything destructive, or ask them to check the connector in ChatGPT
+   themselves.
 10. **Stay on normal Chat; auto-dismiss Work suggestions.** Keep every ChatGPT
     interaction on the normal Chat surface. If ChatGPT offers to switch to
     Work, dismiss it yourself without asking the user, and never select the
@@ -295,12 +323,14 @@ themselves — this workflow does all of that.
    the named-tunnel upgrade and never recreates the existing connector or
    forces reauthorization by itself. After it returns, run
    `c2c doctor -w <workspace> --agent codex --json`: if the tunnel URL
-   actually changed (`chatgptRepair.needed` is `true`), follow **Workflow:
+   actually changed (`chatgptRepair.needed` is `true` AND
+   `chatgptRepair.reason === "address_reclaimed"`), follow **Workflow:
    reconnect after address reclaim** to Delete + recreate the *existing*
    connector — never a second one for this workspace. If
-   `chatgptRepair.needed` is `false` (the upgrade fell back to Quick Tunnel
-   again, or nothing changed), continue straight to step 5 with the
-   existing connection as-is.
+   `chatgptRepair.needed` is `false`, or true for any other reason (the
+   upgrade fell back to Quick Tunnel again, nothing changed, or only
+   `connectorRepairPending` is set), do not run that workflow — continue
+   straight to step 5 with the existing connection as-is.
 2c. If `tunnel.namedFallbackActive` is `true` (this also makes `needsInit`
    `true`, but check this FIRST, before step 3): a Named Tunnel is already
    configured for this workspace, but the bridge is currently running
@@ -316,9 +346,11 @@ themselves — this workflow does all of that.
    - `namedFallbackActive` now `false`: repaired. The hostname didn't
      change, so the existing ChatGPT connector should keep working as-is
      — continue straight to step 5 (Project Bootstrap) unless
-     `chatgptRepair.needed` came back `true` from the doctor call (rare —
-     only if the address itself also changed), in which case follow
-     **Workflow: reconnect after address reclaim** first.
+     `chatgptRepair.needed` came back `true` with
+     `chatgptRepair.reason === "address_reclaimed"` from the doctor call
+     (rare — only if the address itself also changed), in which case follow
+     **Workflow: reconnect after address reclaim** first. A `needed: true`
+     for any other reason does not, by itself, warrant that workflow.
    - still `true`: the underlying issue persists. Do not loop — retry
      `doctor --fix` at most once more, then report it to the user and
      continue to step 5 anyway with the working Quick connection; the
@@ -626,9 +658,16 @@ ChatGPT's replies are expected to be substantive (see step 4). Docs: `docs/proto
    is not green, do not open ChatGPT and do not send INIT. If
    `namedRepair.needed` is true, tell the user `namedRepair.userMessage`, run
    `c2c tunnel login --json` (their browser; Cloudflare exception), then doctor
-   again. If `chatgptRepair.needed` is true, tell the user `chatgptRepair.userMessage`
-   (one paragraph, no internals), run **Workflow: reconnect after address
-   reclaim**, then doctor again and only continue when the gate is green.
+   again. If `chatgptRepair.needed` is true AND
+   `chatgptRepair.reason === "address_reclaimed"`, tell the user
+   `chatgptRepair.userMessage` (one paragraph, no internals), run
+   **Workflow: reconnect after address reclaim**, then doctor again and only
+   continue when the gate is green. If `chatgptRepair.needed` is true for
+   any OTHER reason (in particular `connectorRepairPending` alone, `reason`
+   absent), do NOT run that workflow — see the destructive-authorization
+   paragraph under golden rule 9: report what doctor found and wait for the
+   user's own explicit go-ahead, or ask them to check the connector in
+   ChatGPT themselves, before proceeding.
    Generate task id: `c2c_` + 4 random hex chars — unless a checkpoint already
    has one (reuse that id; do not mint a second task).
 1. **AI_CONTEXT.md check.** If `<workspace>/AI_CONTEXT.md` does not exist,
@@ -811,8 +850,12 @@ the previous public address is gone. Doctor already started a new one.
    `[C2C]` until local is green, except reconnect settings pages.
 2. If `namedRepair.needed`, tell the user `namedRepair.userMessage`, run
    `c2c tunnel login --json`, then doctor again. Do not Delete the connector.
-3. If `chatgptRepair.needed`, follow **reconnect after address reclaim**, then
-   doctor again.
+3. If `chatgptRepair.needed` and `chatgptRepair.reason === "address_reclaimed"`,
+   follow **reconnect after address reclaim**, then doctor again. If
+   `chatgptRepair.needed` is true for any other reason, do not follow that
+   workflow — report doctor's findings (including `remote.connectorState:
+   "unconfirmed"`) and wait for the user's explicit go-ahead per the
+   destructive-authorization paragraph under golden rule 9.
 4. Otherwise apply the recovery map. Only involve the user for login / 2FA /
    CAPTCHA — one action.
 
@@ -821,7 +864,7 @@ the previous public address is gone. Doctor already started a new one.
 | Symptom | Action |
 | --- | --- |
 | Bridge not running | `c2c start` (doctor does this automatically) |
-| Tunnel dead / URL unreachable / 全关掉后连接失效 | `c2c doctor` → if `namedRepair.needed`, login to Cloudflare and doctor again (do not Delete). If `chatgptRepair.needed`, tell the user the message, then **Delete** THIS workspace's connector only (`connectorName`) and create it again. Never Reconnect. |
+| Tunnel dead / URL unreachable / 全关掉后连接失效 | `c2c doctor` → if `namedRepair.needed`, login to Cloudflare and doctor again (do not Delete). If `chatgptRepair.needed` AND `chatgptRepair.reason === "address_reclaimed"`, tell the user the message, then **Delete** THIS workspace's connector only (`connectorName`) and create it again. Never Reconnect. If `needed` is true for any other reason, report it non-destructively instead (see golden rule 9) — do not Delete/recreate on that basis alone. |
 | ChatGPT says tool call failed / 401 | token expired or revoked → re-pair (new pairing code + authorize) |
 | Pairing code rejected/expired | `c2c pair --json` for a fresh code |
 | Same explicit ChatGPT setup/reconnect browser configuration step fails twice after repair | Stop automating ChatGPT settings and use **Guided manual ChatGPT setup fallback**. Do not count browser/js timeout, loading/generating, or login/2FA waiting as failures. |

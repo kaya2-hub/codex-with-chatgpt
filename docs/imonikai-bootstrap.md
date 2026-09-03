@@ -40,10 +40,13 @@ needsInit?
                           "Re-running" below). If the resulting mcpUrl
                           differs from what ChatGPT currently has, `c2c
                           doctor --json` reports `chatgptRepair.needed:
-                          true` — follow **Workflow: reconnect after
-                          address reclaim** (Delete + recreate the
-                          connector; ChatGPT has no Server-URL-edit
-                          control) instead of creating a second connector.
+                          true` with `chatgptRepair.reason:
+                          "address_reclaimed"` — only that reason follows
+                          **Workflow: reconnect after address reclaim**
+                          (Delete + recreate the connector; ChatGPT has no
+                          Server-URL-edit control) instead of creating a
+                          second connector. `needed: true` for any other
+                          reason does not, by itself, warrant that workflow.
   ↓
 Skill drives the ChatGPT browser: create/reuse connector, authorize with the
 pairing code (this step cannot move into the CLI — the Bridge never touches

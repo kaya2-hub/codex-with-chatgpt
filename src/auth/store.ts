@@ -34,7 +34,14 @@ export interface AuthorizationCodeRecord {
 
 export interface TokenRecord {
   hash: string;
-  kind: "access" | "refresh";
+  /** "self_test" is a doctor-only, least-privilege token used to exercise the
+   *  real bearerAuth + /mcp code path end to end (see AuthStore.issueSelfTestToken).
+   *  It is a valid bearer credential for /mcp, but is deliberately excluded from
+   *  tokenCount()/hasUsableAuthorization() — those two exist specifically to answer
+   *  "has ChatGPT's own connector authorized against this workspace", and a
+   *  self-test token issued and revoked within a single `doctor` run must never
+   *  contaminate that signal. */
+  kind: "access" | "refresh" | "self_test";
   clientId: string;
   workspaceId: string;
   scopes: string[];
@@ -55,6 +62,13 @@ export type VerifyTokenResult =
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
+/** Short by design: a self-test token only needs to live for one `doctor`
+ *  round trip (issue -> call /mcp -> revoke), never for a real client session. */
+const SELF_TEST_TOKEN_TTL_MS = 60 * 1000;
+const SELF_TEST_CLIENT_ID = "c2c-doctor-self-test";
+/** Fixed, not caller-supplied -- least privilege must hold by construction,
+ *  not by every caller happening to ask for the minimal set. */
+const SELF_TEST_SCOPES: readonly Scope[] = ["workspace.read"];
 
 function sha256hex(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -97,6 +111,11 @@ export class AuthStore {
     const now = Date.now();
     for (const client of data.clients ?? []) this.clients.set(client.clientId, client);
     for (const token of data.tokens ?? []) {
+      // self_test must never be reconstituted from disk -- unconditional,
+      // regardless of revoked/expiresAt, so even a token an older or buggy
+      // build once wrote to this exact file can never come back to life on
+      // restart. See issueSelfTestToken(); reviewed 2026-09-03.
+      if (token.kind === "self_test") continue;
       if (!token.revoked && token.expiresAt > now) this.tokens.set(token.hash, token);
     }
   }
@@ -105,7 +124,13 @@ export class AuthStore {
     const now = Date.now();
     const state: PersistedAuthState = {
       clients: [...this.clients.values()],
-      tokens: [...this.tokens.values()].filter((t) => !t.revoked && t.expiresAt > now),
+      // self_test is excluded unconditionally (not just when expired/revoked)
+      // -- it must never touch disk, no matter what other operation on this
+      // same AuthStore instance happens to trigger a save() while one is
+      // still live in memory (a concurrent real OAuth issuance, a client
+      // registration, another token's revoke, or another concurrent
+      // doctor invocation's own self-test token). See issueSelfTestToken().
+      tokens: [...this.tokens.values()].filter((t) => t.kind !== "self_test" && !t.revoked && t.expiresAt > now),
     };
     writeSecureJson(this.file, state);
   }
@@ -212,10 +237,41 @@ export class AuthStore {
   verifyAccessToken(token: string): VerifyTokenResult {
     const record = this.tokens.get(sha256hex(token));
     if (!record) return { ok: false, reason: "unknown" };
-    if (record.kind !== "access") return { ok: false, reason: "wrong_kind" };
+    // A self-test token is a valid bearer credential for /mcp -- it exercises the
+    // exact same bearerAuth code path a real access token does (see issueSelfTestToken).
+    if (record.kind !== "access" && record.kind !== "self_test") return { ok: false, reason: "wrong_kind" };
     if (record.revoked) return { ok: false, reason: "revoked" };
     if (Date.now() > record.expiresAt) return { ok: false, reason: "expired" };
     return { ok: true, record };
+  }
+
+  /**
+   * Issue a least-privilege, short-lived token for `doctor`'s own real
+   * bearerAuth + /mcp round trip (P0-3, connector reliability hardening).
+   * Deliberately NOT `issueTokens()`: that path is for real OAuth clients and
+   * its output feeds `tokenCount()`/`hasUsableAuthorization()`, which exist
+   * specifically to answer "has ChatGPT's own connector authorized against
+   * this workspace" -- a self-test token issued by the local CLI itself must
+   * never be able to make that answer "yes" on its own. Not persisted to
+   * disk: it only ever needs to be verified within this same running bridge
+   * process, by the same `doctor` invocation that requested it, before its
+   * caller explicitly revokes it (or its 60s TTL elapses).
+   */
+  issueSelfTestToken(): { token: string; expiresAt: number } {
+    const now = Date.now();
+    const token = newToken("c2c_st");
+    const expiresAt = now + SELF_TEST_TOKEN_TTL_MS;
+    this.tokens.set(sha256hex(token), {
+      hash: sha256hex(token),
+      kind: "self_test",
+      clientId: SELF_TEST_CLIENT_ID,
+      workspaceId: this.workspaceId,
+      scopes: [...SELF_TEST_SCOPES],
+      issuedAt: now,
+      expiresAt,
+      revoked: false,
+    });
+    return { token, expiresAt };
   }
 
   /** Refresh-token rotation: old refresh token is revoked, a new pair is issued. */
@@ -256,8 +312,13 @@ export class AuthStore {
     return count;
   }
 
+  /** Excludes self_test tokens -- see TokenRecord.kind. */
   tokenCount(): number {
-    return this.tokens.size;
+    let count = 0;
+    for (const token of this.tokens.values()) {
+      if (token.kind !== "self_test") count++;
+    }
+    return count;
   }
 
   /** Unlike `tokenCount()`, this re-checks expiry live rather than trusting
@@ -271,6 +332,9 @@ export class AuthStore {
   hasUsableAuthorization(): boolean {
     const now = Date.now();
     for (const token of this.tokens.values()) {
+      // A self-test token proves the local MCP round trip works, not that
+      // ChatGPT's own connector holds a credential -- must never count here.
+      if (token.kind === "self_test") continue;
       if (!token.revoked && token.expiresAt > now) return true;
     }
     return false;

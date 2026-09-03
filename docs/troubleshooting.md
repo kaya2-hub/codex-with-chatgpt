@@ -21,11 +21,17 @@ again. The local process may still be running.
 
 ### Everything was quit and ChatGPT can no longer connect
 Quitting Codex / the terminal stops the public address. The next `c2c doctor`
-starts a new address and sets `chatgptRepair.needed`. The Skill should tell the
-user that the old address expired, then **Delete** THIS workspace's
-connector (`chatgptRepair.connectorName`) and create it again with the new
-address (never click Reconnect — the old URL is dead). Other workspaces keep
-their own connectors so two projects can stay connected at once.
+starts a new address and sets `chatgptRepair.needed` with
+`chatgptRepair.reason: "address_reclaimed"` — this is the one case where
+`needed` alone (paired with that specific reason) legitimately authorizes a
+destructive fix. The Skill should tell the user that the old address
+expired, then **Delete** THIS workspace's connector
+(`chatgptRepair.connectorName`) and create it again with the new address
+(never click Reconnect — the old URL is dead). Other workspaces keep their
+own connectors so two projects can stay connected at once. If `needed` is
+true WITHOUT `reason: "address_reclaimed"` (e.g. only `connectorRepairPending`),
+do NOT Delete/recreate on that basis — see the destructive-authorization
+paragraph in golden rule 9 of the Skill.
 
 Fixed ChatGPT pages for first-time setup and later repair (do not hunt the UI):
 
@@ -36,7 +42,10 @@ Fixed ChatGPT pages for first-time setup and later repair (do not hunt the UI):
 
 ### Tunnel URL unreachable / ChatGPT says the connector is broken
 Same as above: `c2c doctor`, then Delete + recreate THIS workspace's
-connector if `chatgptRepair.needed`. Fresh pairing code: `c2c pair`.
+connector if `chatgptRepair.needed` AND `chatgptRepair.reason ===
+"address_reclaimed"`. If `needed` is true for any other reason, do not
+Delete/recreate on that basis alone — see golden rule 9. Fresh pairing
+code: `c2c pair`.
 If this workspace uses a stable hostname, doctor sets `namedRepair` instead —
 re-login to Cloudflare (`c2c tunnel login`) and doctor again. Do not Delete
 the connector; the address did not change.

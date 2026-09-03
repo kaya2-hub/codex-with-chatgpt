@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { startBridge } from "../bridge/server.js";
 import { findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
 import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
@@ -430,7 +432,11 @@ program
   .action(async (opts: { workspace?: string; agent?: string; fix: boolean; json: boolean }) => {
     const root = resolveWorkspace(opts.workspace);
     const agent = parseAgent(opts.agent);
-    const report: Record<string, { ok: boolean; detail?: string }> = {};
+    // `scope` is typed to accept only the literal "local" -- there is
+    // deliberately no other value it could ever be set to, so a report entry
+    // carrying it can never be mistaken for a remote (ChatGPT-side) result at
+    // the type level, not just by convention. See report.mcpAuthenticated.
+    const report: Record<string, { ok: boolean; detail?: string; scope?: "local" }> = {};
     const results: string[] = [];
 
     // Node
@@ -472,6 +478,18 @@ program
     // Bridge
     let runtime: RuntimeState | null = null;
     let bridgeUnknown = false;
+    // P1-5: purely observational comparison of an ALREADY-RUNNING bridge's own
+    // recorded version/schema against this CLI invocation's current VERSION --
+    // never triggers a restart or any other action by itself. A real, live
+    // instance of this drift (2 of 3 running bridges predating the `generation`
+    // field) was found during the connector reliability audit that motivated
+    // this iteration.
+    let versionInfo: {
+      runtimeVersion: string;
+      currentVersion: string;
+      versionDrift: boolean;
+      schemaDrift: boolean;
+    } | null = null;
     if (workspace) {
       const observation = await findBridgeObservation(workspace.id);
       if (observation.state === "healthy") {
@@ -496,8 +514,15 @@ program
           report.bridge = { ok: false, detail: (error as Error).message };
         }
       }
-      if (runtime) report.bridge = { ok: true, detail: `端口 ${runtime.port}` };
-      else report.bridge = report.bridge ?? { ok: false, detail: "未运行" };
+      if (runtime) {
+        const versionDrift = runtime.version !== VERSION;
+        const schemaDrift = runtime.generation === undefined;
+        versionInfo = { runtimeVersion: runtime.version, currentVersion: VERSION, versionDrift, schemaDrift };
+        const driftNote = versionDrift ? `，运行版本 v${runtime.version}（当前 v${VERSION}，重启可更新）` : "";
+        report.bridge = { ok: true, detail: `端口 ${runtime.port}${driftNote}` };
+      } else {
+        report.bridge = report.bridge ?? { ok: false, detail: "未运行" };
+      }
     }
 
     // MCP local reachability (401 without token means MCP + auth both work)
@@ -508,10 +533,65 @@ program
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ jsonrpc: "2.0", method: "ping", id: 1 }),
         });
+        // `oauth` is kept verbatim (name and computation) for backward
+        // compatibility with existing consumers of `doctor --json`. Its name
+        // is misleading -- it only proves the local bearerAuth REJECT path
+        // works, nothing about ChatGPT's own OAuth state -- so `authMiddleware`
+        // is added alongside as the accurately-named field going forward.
+        // Neither is removed or renamed in this iteration.
         report.mcp = { ok: response.status === 401, detail: `未授权请求返回 ${response.status}` };
         report.oauth = { ok: response.status === 401 };
+        report.authMiddleware = {
+          ok: response.status === 401,
+          detail: `未授权请求返回 ${response.status}（拒绝路径）`,
+        };
       } catch (error) {
         report.mcp = { ok: false, detail: (error as Error).message };
+      }
+
+      // P0-3: the ACCEPT path of that same middleware, using a least-privilege,
+      // short-lived self-test token (see AuthStore.issueSelfTestToken) so a real
+      // authorized request through the real bearerAuth + /mcp code path is
+      // actually exercised -- the 401 check above only ever proves rejection
+      // works, never that a valid credential is honored correctly.
+      // `scope: "local"` is always present and load-bearing: this proves the
+      // local MCP server answers a well-formed authorized request correctly.
+      // It proves NOTHING about whether ChatGPT itself can reach this bridge
+      // -- that remains `remote.connectorState: "unconfirmed"` below.
+      let selfTestToken: string | null = null;
+      try {
+        const issued = await adminFetch<{ token: string; expiresAt: number }>(
+          runtime,
+          "POST",
+          "/admin/self-test-token"
+        );
+        selfTestToken = issued.token;
+        const client = new Client({ name: "c2c-doctor-self-test", version: VERSION });
+        try {
+          const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${runtime.port}/mcp`), {
+            requestInit: { headers: { authorization: `Bearer ${issued.token}` } },
+          });
+          await client.connect(transport);
+          const result = await client.callTool({ name: "workspace_info", arguments: {} });
+          const content = result.content as { type: string; text: string }[] | undefined;
+          const parsed = JSON.parse(content?.[0]?.text ?? "{}") as { workspaceId?: string };
+          const matches = Boolean(workspace) && parsed.workspaceId === workspace?.id;
+          report.mcpAuthenticated = {
+            ok: matches,
+            scope: "local",
+            detail: matches ? "已授权请求成功往返" : "返回内容与当前 workspace 不匹配",
+          };
+        } finally {
+          await client.close().catch(() => undefined);
+        }
+      } catch (error) {
+        report.mcpAuthenticated = { ok: false, scope: "local", detail: (error as Error).message };
+      } finally {
+        if (selfTestToken) {
+          await adminFetch(runtime, "POST", "/admin/self-test-token/revoke", 5000, { token: selfTestToken }).catch(
+            () => undefined
+          );
+        }
       }
     }
 
@@ -529,6 +609,12 @@ program
       : "Codex with ChatGPT";
     const tunnelState = workspace ? readTunnelState(workspace.id) : null;
     const namedReady = tunnelState ? isNamedTunnelReady(tunnelState) : false;
+    // P0-1/P0-2: what C2C actually, locally observed about the public tunnel just
+    // now -- distinct from `remote.connectorState` below, which C2C can never
+    // observe at all. "not_configured" is the default (no public URL was ever
+    // expected); "unknown" only when the bridge state itself couldn't be
+    // determined, so reachability genuinely couldn't be assessed either.
+    let remoteTunnelReachability: "reachable" | "unreachable" | "not_configured" | "unknown" = "not_configured";
     let namedRepair: { needed: boolean; userMessage?: string } = { needed: false };
     let chatgptRepair: {
       needed: boolean;
@@ -618,6 +704,7 @@ program
       }
 
       if (currentUrl && healthy) {
+        remoteTunnelReachability = "reachable";
         report.tunnel = { ok: true, detail: currentUrl };
         const nextMcp = mcpUrlFromPublic(currentUrl);
         const action = connectorAction(lastEndpoint?.mcpUrl, nextMcp);
@@ -668,9 +755,11 @@ program
           }
         }
       } else if (namedReady) {
+        remoteTunnelReachability = "unreachable";
         report.tunnel = report.tunnel ?? { ok: false, detail: "NAMED_TUNNEL_DOWN" };
         namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
       } else if (expectedPublic) {
+        remoteTunnelReachability = "unreachable";
         report.tunnel = report.tunnel ?? { ok: false, detail: "安全连接未恢复" };
         chatgptRepair = {
           ...chatgptRepair,
@@ -682,16 +771,21 @@ program
           mcpUrl: null,
         };
       } else if (!currentUrl) {
+        remoteTunnelReachability = "not_configured";
         report.tunnel = { ok: true, detail: "未启用（本地模式）" };
       } else {
+        remoteTunnelReachability = "unreachable";
         report.tunnel = { ok: false, detail: "公网地址无法访问" };
       }
     } else if (bridgeUnknown) {
+      remoteTunnelReachability = "unknown";
       report.tunnel = report.tunnel ?? { ok: false, detail: "Bridge 状态无法确认，未执行连接器修复" };
     } else if (namedReady) {
+      remoteTunnelReachability = "unreachable";
       report.tunnel = { ok: false, detail: "NAMED_TUNNEL_DOWN" };
       namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
     } else if (lastEndpoint?.publicUrl) {
+      remoteTunnelReachability = "unreachable";
       report.tunnel = { ok: false, detail: "安全连接未运行" };
       chatgptRepair = {
         ...chatgptRepair,
@@ -703,8 +797,43 @@ program
       };
     }
 
+    // P0-1/P0-2: what C2C actually observed vs. what it can never observe.
+    // `connectorState` is always the literal "unconfirmed" -- never inferred
+    // as disabled/expired/etc from local state, on purpose.
+    const remote = {
+      tunnelReachability: remoteTunnelReachability,
+      connectorState: "unconfirmed" as const,
+      connectorStateNote:
+        "C2C cannot observe ChatGPT's connector toggle state; this is never inferred, only ever reported as unconfirmed.",
+      lastConfirmedRoundTripAt: workspace ? (readConnectorConfirmation(workspace.id)?.confirmedAt ?? null) : null,
+    };
+    // P0-4: fail-closed by design, and NOT derived from chatgptRepair.needed --
+    // see the doc comment on this block in docs/protocol.md. `chatgptRepair`
+    // (including its existing `reason === "address_reclaimed"` self-heal path)
+    // is unchanged by this flag and keeps working exactly as before; this flag
+    // exists only to stop any OTHER destructive connector action (prompted by
+    // e.g. connectorRepairPending alone, a suspected OAuth failure, or a
+    // suspected disabled connector) from being taken on local inference alone.
+    const destructiveConnectorRepairAuthorized = false as const;
+    const destructiveConnectorRepairNote =
+      'Always false in this version: C2C cannot observe ChatGPT\'s connector state, so no ' +
+      "destructive connector action (delete/recreate/OAuth re-auth) may be taken on local " +
+      'inference alone. Does not gate the existing chatgptRepair.reason === "address_reclaimed" ' +
+      "self-heal path, which remains its own narrow, already-deterministic exception.";
+
     if (opts.json) {
-      say(JSON.stringify({ report, repairs: results, chatgptRepair, namedRepair }));
+      say(
+        JSON.stringify({
+          report,
+          repairs: results,
+          chatgptRepair,
+          namedRepair,
+          remote,
+          versionInfo,
+          destructiveConnectorRepairAuthorized,
+          destructiveConnectorRepairNote,
+        })
+      );
       return;
     }
     say(`${PRODUCT_NAME} Doctor`);
@@ -716,6 +845,8 @@ program
       bridge: "Bridge",
       mcp: "MCP",
       oauth: "OAuth",
+      authMiddleware: "Auth Middleware（同 OAuth，命名更准确，新增）",
+      mcpAuthenticated: "MCP 授权往返（本地）",
       tunnel: "Tunnel",
     };
     let allOk = true;
@@ -729,6 +860,14 @@ program
     }
     for (const repair of results) say(`· ${repair}`);
     say("");
+    say(`远程（ChatGPT connector）状态：${remote.connectorState}（C2C 无法直接观测，不做推测）`);
+    if (remote.lastConfirmedRoundTripAt) say(`· 上次确认的授权往返：${remote.lastConfirmedRoundTripAt}`);
+    if (versionInfo?.versionDrift || versionInfo?.schemaDrift) {
+      say(
+        `· 运行中 Bridge 版本与当前代码不一致（v${versionInfo.runtimeVersion} vs v${versionInfo.currentVersion}），建议 c2c restart`
+      );
+    }
+    say("");
     if (namedRepair.needed && namedRepair.userMessage) {
       say(namedRepair.userMessage);
       say("");
@@ -739,14 +878,23 @@ program
       if (chatgptRepair.pairingCode) say(`配对码：${chatgptRepair.pairingCode}`);
       say("");
     }
+    // Independent review (2026-09-03) found that this summary line used to
+    // say "delete and re-add the connector" for ANY chatgptRepair.needed --
+    // including the connectorRepairPending-only case (reason undefined),
+    // which is exactly the case destructiveConnectorRepairAuthorized exists
+    // to fail-close. Only the existing, already-deterministic
+    // reason === "address_reclaimed" case gets the destructive instruction;
+    // every other chatgptRepair.needed case gets a non-destructive one.
     say(
       allOk && !chatgptRepair.needed && !namedRepair.needed
         ? "Everything looks good."
-        : chatgptRepair.needed
+        : chatgptRepair.needed && chatgptRepair.reason === "address_reclaimed"
           ? "本地已就绪，还需要在 ChatGPT 删除并重新添加该连接。"
-          : namedRepair.needed
-            ? "固定域名还没连上，需要先登录 Cloudflare。"
-            : "仍有问题未解决，可尝试 `c2c restart --tunnel`。"
+          : chatgptRepair.needed
+            ? "本地已就绪，但无法确认 ChatGPT 侧连接器的实际状态（remote.connectorState: unconfirmed）。暂不建议自动删除/重建连接器，请自行在 ChatGPT 中确认，或在获得明确授权后再处理。"
+            : namedRepair.needed
+              ? "固定域名还没连上，需要先登录 Cloudflare。"
+              : "仍有问题未解决，可尝试 `c2c restart --tunnel`。"
     );
     if (!allOk || namedRepair.needed) process.exitCode = 1;
   });

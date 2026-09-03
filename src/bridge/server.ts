@@ -183,6 +183,22 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     res.json({ code: session.code, expiresAt: session.expiresAt });
   });
 
+  // ---- Self-test token (doctor's real bearerAuth + /mcp round trip, P0-3) ----
+  // Loopback + admin token only, same as every other /admin/* route -- never
+  // reachable through the tunnel. Least privilege (workspace.read only) and
+  // 60s TTL are enforced inside AuthStore.issueSelfTestToken, not here.
+
+  app.post("/admin/self-test-token", adminGuard, (_req, res) => {
+    const { token, expiresAt } = authStore.issueSelfTestToken();
+    res.json({ token, expiresAt });
+  });
+
+  app.post("/admin/self-test-token/revoke", adminGuard, express.json(), (req: Request, res: Response) => {
+    const token = typeof req.body?.token === "string" ? req.body.token : "";
+    const revoked = token !== "" && authStore.revokeToken(token);
+    res.json({ revoked });
+  });
+
   app.get("/admin/info", adminGuard, (_req, res) => {
     res.json({
       service: SERVICE_NAME,

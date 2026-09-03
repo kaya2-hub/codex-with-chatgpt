@@ -104,14 +104,21 @@ export async function adminFetch<T = unknown>(
   runtime: RuntimeState,
   method: "GET" | "POST",
   route: string,
-  timeoutMs = 60_000
+  timeoutMs = 60_000,
+  /** Optional JSON body. Added for /admin/self-test-token/revoke (P0-3); every
+   *  pre-existing call site omits this and is completely unaffected. */
+  requestBody?: unknown
 ): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`http://127.0.0.1:${runtime.port}${route}`, {
       method,
-      headers: { Authorization: `Bearer ${runtime.adminToken}` },
+      headers: {
+        Authorization: `Bearer ${runtime.adminToken}`,
+        ...(requestBody !== undefined ? { "content-type": "application/json" } : {}),
+      },
+      body: requestBody !== undefined ? JSON.stringify(requestBody) : undefined,
       signal: controller.signal,
     });
     const body = (await response.json().catch(() => ({}))) as T & { message?: string };

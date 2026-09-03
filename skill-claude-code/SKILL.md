@@ -424,8 +424,15 @@ new chat per task or per Claude Code session.
 - **Save it**: right after creating a new C2C chat (boot prompt sent), read
   the conversation URL from the browser's address bar (visible UI state
   only) and run `c2c session set -w <ws> --url <url> --title "C2C <workspace name>"`.
-- **Update it**: after each EXECUTED/DONE, run
-  `c2c session set -w <ws> --task <id> --iteration <n> --state <STATE>`.
+- **Update it**: at each of the 5 protocol wire states (INIT / PLAN /
+  EXECUTED / DONE / BLOCKED), run
+  `c2c session set -w <ws> --task <id> --iteration <n> --state <STATE>` --
+  this is also the canonical emitter Kokuban (Personal Core's Activity Event
+  Log) reads from, so skipping a state here means that Activity Event never
+  gets recorded, not just a missed local bookkeeping update. See the exact
+  emission point for each state in **Workflow: coding task** below, and
+  `docs/protocol.md` § Canonical state emission for the underlying contract
+  (identical for Codex and Claude Code).
 - **Switch it** ONLY when (a) the user explicitly asks for a new chat, or
   (b) the current chat has become so long it visibly lags. When switching:
   1. Same tab: go to `https://chatgpt.com/`, send the boot prompt.
@@ -485,6 +492,9 @@ Inspect the connected workspace through the Codex with ChatGPT MCP connector.
 Produce a C2C PLAN message.
 ```
 
+   Then (canonical state emission — see `docs/protocol.md` § Canonical state
+   emission):
+   `c2c session set -w <ws> --task c2c_f81a --iteration 0 --state INIT`
 4. Wait for ChatGPT's `STATE: PLAN` reply (**ChatGPT browser workflow** § 6 —
    short checks, same tab; a browser-tool timeout is not failure). Read
    GOAL/ACTIONS/TESTS/SUCCESS_CRITERIA. A good PLAN also carries RATIONALE
@@ -492,10 +502,14 @@ Produce a C2C PLAN message.
    change, why). If the reply is a bare one-liner with no rationale or
    file-level guidance, ask once: "Please expand the plan with rationale and
    concrete per-file suggestions."
+   Then (`--iteration` is the number ChatGPT's PLAN message carried):
+   `c2c session set -w <ws> --iteration <n> --state PLAN`
 5. Execute the plan yourself with your own tools (Read/Edit/Write/Bash/git;
    your own judgment). ChatGPT does not micro-manage tool calls.
 6. Record the execution so ChatGPT can read it via MCP:
    `c2c record -w <ws> --task c2c_f81a --iteration 1 --changed-files "src/a.ts,src/b.ts" --tests "27 passed" --exit-status ok`
+   Then, before sending EXECUTED (canonical state emission):
+   `c2c session set -w <ws> --iteration 1 --state EXECUTED`
 7. Send EXECUTED (no diffs, no logs):
 
 ```
@@ -520,14 +534,24 @@ Please independently inspect the workspace and current git diff through MCP.
    DONE / PLAN (next iteration) / BLOCKED.
 9. Loop. Respect maxIterations (`.c2c.json`, default 12). At the limit, pause
    and ask the user: "已完成 12 轮协作，仍有未解决问题，是否继续？"
-10. On DONE: summarize the result to the user in plain language. Then update
-    `AI_CONTEXT.md` if this task actually changed the project's current
-    state (phase, confirmed decisions, newly obsolete items) — grounded in
-    the real diff, test results, and what was just confirmed with ChatGPT,
-    never in the mere fact that a task finished. See `docs/ai-context.md`
-    § Updating it. If nothing about the project's current state changed,
-    leave the file alone.
-11. On BLOCKED: read ChatGPT's reason, fix what you can, or surface the
+10. On DONE: canonical state emission comes FIRST, before anything else
+    (independent review, 2026-09-03: summarizing/AI_CONTEXT first left a
+    window where a crash between receiving DONE and running this command
+    lost the transition from Kokuban entirely, leaving the blackboard
+    stuck on the previous state):
+    `c2c session set -w <ws> --state DONE`
+    Only then summarize the result to the user in plain language, and
+    update `AI_CONTEXT.md` if this task actually changed the project's
+    current state (phase, confirmed decisions, newly obsolete items) —
+    grounded in the real diff, test results, and what was just confirmed
+    with ChatGPT, never in the mere fact that a task finished. See
+    `docs/ai-context.md` § Updating it. If nothing about the project's
+    current state changed, leave the file alone.
+11. On BLOCKED: canonical state emission comes FIRST too, before reading/
+    acting on the reason (same rationale as DONE above; `--iteration` is
+    the number ChatGPT's BLOCKED message carried):
+    `c2c session set -w <ws> --iteration <n> --state BLOCKED`
+    Only then read ChatGPT's reason, fix what you can, or surface the
     single decision the user must make.
 
 ## Workflow: disconnect（"断开 ChatGPT"）

@@ -65,14 +65,27 @@ export interface ChatGptPolicy {
 }
 
 /**
- * Opt-in reporting of confirmed C2C state transitions to Kokuban (黒板) --
- * Personal Core's Activity Event Log. Absent by default: every workspace
- * without this block behaves exactly as before (see src/session/kokuban.ts,
- * the single hook point this feeds -- no per-workspace producer sprawl).
+ * Reporting of confirmed C2C state transitions to Kokuban (黒板) -- Personal
+ * Core's Activity Event Log. This is the RAW shape read directly from
+ * `.c2c.json`, and every field is optional: default-ON participation and
+ * projectKey auto-derivation (Kokuban ITERATION 4, independent review
+ * 2026-09-03) mean a workspace with no `kokuban` block at all, or a block
+ * missing `projectKey`, is still fully valid input. See
+ * src/session/kokuban-config.ts's resolveEffectiveKokubanConfig() -- the
+ * SINGLE place that turns this raw, possibly-sparse shape into a concrete
+ * EffectiveKokubanConfig (or null for an explicit opt-out) -- for the
+ * actual enabled/projectKey resolution rules. Never resolve those rules
+ * ad hoc at a call site.
  */
 export interface KokubanConfig {
-  /** projectKey as Kokuban should record it (Personal Core's project_key vocabulary). */
-  projectKey: string;
+  /** Explicit opt-out when `false`. Absent (or `true`) means participate --
+   *  default-ON, not opt-in, as of ITERATION 4. */
+  enabled?: boolean;
+  /** projectKey as Kokuban should record it (Personal Core's project_key
+   *  vocabulary). Explicit here always wins; absent means mechanically
+   *  derive one from workspace identity -- see deriveProjectKey() in
+   *  src/session/kokuban-config.ts. */
+  projectKey?: string;
   /** Default: https://core.bluecabi.net */
   apiBaseUrl?: string;
   /** Env var holding a kokuban:write-scoped bearer token. Default: KOKUBAN_WRITE_TOKEN. Never read from .c2c.json itself -- this file only ever names the env var, never a secret value. */

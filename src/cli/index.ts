@@ -68,7 +68,14 @@ import {
 } from "../session/state.js";
 import { appendExecutionRecord } from "../execution/records.js";
 import { saveExecutionOutput } from "../execution/output.js";
-import { deriveKokubanExtras, reportKokubanTransition } from "../session/kokuban.js";
+import {
+  deriveKokubanExtras,
+  prepareKokubanTransition,
+  reconcileKokubanOutboxLocally,
+  sendKokubanEventsInOrder,
+} from "../session/kokuban.js";
+import { resolveEffectiveKokubanConfig } from "../session/kokuban-config.js";
+import { commitOutboxEvent, runUnderKokubanLock, type KokubanCanonicalEvent } from "../session/kokuban-outbox.js";
 
 const program = new Command();
 
@@ -1187,6 +1194,15 @@ session
       clearCheckpoint: boolean;
     }) => {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
+
+      // Default-ON as of ITERATION 4: resolveEffectiveKokubanConfig() is
+      // the SINGLE place that decides participation + projectKey (no
+      // block at all -> ON with a derived projectKey; `enabled:false` ->
+      // null, the only way to opt out; an explicit projectKey always
+      // wins). null here means genuinely opted out -- the outbox/lock/
+      // network are never touched for this workspace, same as before.
+      const kokubanConfig = resolveEffectiveKokubanConfig(workspace);
+
       const modeRaw = opts.mode?.trim().toLowerCase();
       if (modeRaw && modeRaw !== "long-chat" && modeRaw !== "project") {
         throw new Error("mode must be long-chat or project");
@@ -1204,7 +1220,8 @@ session
       if (waitingNorm && !WAITING_FOR.includes(waitingNorm as WaitingFor)) {
         throw new Error(`waiting-for must be one of ${WAITING_FOR.join(", ")}`);
       }
-      const saved = mergeSession(readSession(workspace.id), {
+
+      const buildSessionPatch = () => ({
         url: opts.url,
         title: opts.title,
         taskId: opts.task,
@@ -1225,33 +1242,103 @@ session
             }
           : undefined,
       });
-      writeSession(workspace.id, saved);
+
+      let saved: ReturnType<typeof mergeSession>;
+      let reconciledToSend: KokubanCanonicalEvent[] = [];
+      let preparedKokubanEvent: KokubanCanonicalEvent | null = null;
+
+      if (kokubanConfig) {
+        // Single contiguous local critical section (independent review,
+        // third round): reconcile any leftover outbox entries from a
+        // PREVIOUS run, read/merge the session, prepare+commit this run's
+        // own new transition, and writeSession() -- all while holding this
+        // workspace's Kokuban lock, all with zero network calls inside it.
+        // Earlier revisions split this into "drain (own lock), then later
+        // re-lock to mutate", which left a gap between the two for another
+        // process to interleave; runUnderKokubanLock() closes that gap by
+        // construction. On lock contention this throws
+        // KokubanLockUnavailableError -- fail CLOSED, never proceed
+        // unlocked -- since contention here means another local process is
+        // concurrently mutating this same workspace's session/outbox right
+        // now, not a Kokuban/network problem. See kokuban-outbox.ts.
+        const result = await runUnderKokubanLock(workspace.id, () => {
+          const { toSend } = reconcileKokubanOutboxLocally(workspace.id);
+          const mergedSaved = mergeSession(readSession(workspace.id), buildSessionPatch());
+          let prepared: KokubanCanonicalEvent | null = null;
+
+          if (opts.state) {
+            const extras = deriveKokubanExtras(mergedSaved.checkpoint);
+            try {
+              prepared = prepareKokubanTransition({
+                workspaceId: workspace.id,
+                config: kokubanConfig,
+                state: opts.state,
+                taskId: mergedSaved.taskId,
+                iteration: mergedSaved.iteration,
+                holderAfter: extras.holderAfter,
+                stopReason: extras.stopReason,
+                summary: extras.summary,
+              });
+            } catch (error) {
+              // A LOCAL write-ahead failure (not a Kokuban/network failure
+              // -- those stay fail-soft, see below) must stop here, before
+              // writeSession(): proceeding would commit C2C state with no
+              // valid local durability record of the corresponding Kokuban
+              // event at all.
+              throw new Error(
+                `Kokuban local write-ahead log could not be written (${(error as Error).message}). Session state was NOT saved. Check local disk/permissions for the state directory, or set "kokuban": { "enabled": false } in .c2c.json to opt this workspace out of Kokuban (participation is default-ON as of ITERATION 4 -- removing the "kokuban" block no longer disables it).`
+              );
+            }
+          }
+
+          writeSession(workspace.id, mergedSaved);
+
+          // The transition is now durably committed. Flip the SAME outbox
+          // entry to "committed" (an exclusively-created marker, never a
+          // rewrite of the immutable payload -- see kokuban-outbox.ts)
+          // while STILL holding the lock -- network sends happen only
+          // after the lock releases, below.
+          if (prepared) {
+            const committed = commitOutboxEvent(workspace.id, prepared.idempotencyKey);
+            if (!committed) {
+              say("⚠ Kokuban本地确认标记写入失败(session已正常保存；下次 session set/clear 时会自动重新确认)。");
+            }
+          }
+
+          return { saved: mergedSaved, toSend, prepared };
+        });
+        saved = result.saved;
+        reconciledToSend = result.toSend;
+        preparedKokubanEvent = result.prepared;
+      } else {
+        saved = mergeSession(readSession(workspace.id), buildSessionPatch());
+        writeSession(workspace.id, saved);
+      }
+
       if (saved.projectUrl && saved.conversationMode === "project") {
         check("已记录 ChatGPT 合集，后续从合集页新开或复用对话");
       } else {
         check("已记录 ChatGPT 会话，后续任务将复用");
       }
 
-      // Opt-in only: workspaces without a "kokuban" block in .c2c.json (the
-      // overwhelming majority) hit `!opts.state` or `!kokubanConfig` and
-      // never call reportKokubanTransition at all -- zero behavior change.
-      const kokubanConfig = workspace.projectConfig.kokuban;
-      if (kokubanConfig && opts.state) {
-        const extras = deriveKokubanExtras(saved.checkpoint);
-        const result = await reportKokubanTransition({
-          config: kokubanConfig,
-          state: opts.state,
-          taskId: saved.taskId,
-          iteration: saved.iteration,
-          holderAfter: extras.holderAfter,
-          stopReason: extras.stopReason,
-          summary: extras.summary,
-        });
-        if (result.attempted) {
-          if (result.ok) {
-            check(`Kokuban: ${result.detail}`);
-          } else {
-            say(`⚠ Kokubanへの記録に失敗しました(session自体は正常に保存済み): ${result.detail}`);
+      // Delivery itself stays fully fail-soft: a send failure leaves the
+      // entry "committed" for the next mutation's reconciliation to retry
+      // with the exact same stored payload; it never blocks or fails this
+      // command. sendKokubanEventsInOrder() delivers strictly in outbox
+      // order and stops at the first unconfirmed/failed send (independent
+      // review, fourth round) -- reconciled leftovers from a previous run
+      // are always older than this run's own new transition, so appending
+      // it last and letting delivery stop early on any earlier failure is
+      // what preserves remote event order.
+      const orderedToSend = preparedKokubanEvent ? [...reconciledToSend, preparedKokubanEvent] : reconciledToSend;
+      if (orderedToSend.length > 0) {
+        const { sentCount, lastAttempted } = await sendKokubanEventsInOrder(workspace.id, orderedToSend);
+        if (preparedKokubanEvent) {
+          const newEventDelivered = sentCount === orderedToSend.length;
+          if (newEventDelivered && lastAttempted) {
+            check(`Kokuban: ${lastAttempted.detail}`);
+          } else if (lastAttempted) {
+            say(`⚠ Kokuban送信は保留されました(次回 session set/clear 時に自動再試行、session自体は正常に保存済み): ${lastAttempted.detail}`);
           }
         }
       }
@@ -1262,12 +1349,40 @@ session
   .command("clear")
   .description("Forget the current ChatGPT chat (Project binding is kept)")
   .option("-w, --workspace <path>")
-  .action((opts: { workspace?: string }) => {
+  .action(async (opts: { workspace?: string }) => {
     const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    const result = clearChatPointer(workspace.id);
+    // clearChatPointer() also calls writeSession() and can wipe
+    // taskId/iteration/lastState -- the exact fields reconciliation compares
+    // a leftover "prepared" entry against. Independent review, third round:
+    // reconciliation and the clear itself must share the SAME critical
+    // section as session set's own mutation (not merely "drain first, then
+    // clear separately" -- that still leaves a gap for another process to
+    // interleave between them). Network sends happen only after release.
+    // Same single effective-config resolver as `session set` -- see its
+    // comment above.
+    const kokubanConfig = resolveEffectiveKokubanConfig(workspace);
+    let reconciledToSend: KokubanCanonicalEvent[] = [];
+    let result: ReturnType<typeof clearChatPointer>;
+
+    if (kokubanConfig) {
+      const outcome = await runUnderKokubanLock(workspace.id, () => {
+        const { toSend } = reconcileKokubanOutboxLocally(workspace.id);
+        return { toSend, cleared: clearChatPointer(workspace.id) };
+      });
+      reconciledToSend = outcome.toSend;
+      result = outcome.cleared;
+    } else {
+      result = clearChatPointer(workspace.id);
+    }
+
     if (!result.cleared) say("尚未记录 ChatGPT 会话。");
     else if (result.keptProject) check("已清除当前对话，合集绑定仍保留");
     else check("已清除会话记录，下次任务将新建 ChatGPT 会话");
+
+    // Delivered strictly in outbox order, stopping at the first
+    // unconfirmed/failed send (independent review, fourth round) -- see
+    // sendKokubanEventsInOrder's doc comment in kokuban.ts.
+    await sendKokubanEventsInOrder(workspace.id, reconciledToSend);
   });
 
 const prefsCmd = program

@@ -50,6 +50,41 @@ iteration after this version writes a checkpoint automatically.
 Do not re-pair, recreate the connector, or rewrite Project instructions
 just to resume.
 
+## Canonical state emission
+
+`c2c session set -w <ws> --task <id> --iteration <n> --state <STATE>` is the
+**single** canonical emitter for all 5 wire states, for both adapters (Codex
+and Claude Code) — it is what Kokuban (Personal Core's Activity Event Log,
+when enabled for this workspace) reads from to record each confirmed state
+transition. Skipping this call for a given transition means that Activity
+Event never gets recorded at all, independent of whatever else the coding
+agent did locally (an omission that actually happened for PLAN and BLOCKED
+before this section existed — see the Skills' own workflow steps, which are
+required to call it out explicitly for every one of the 5 states below, not
+just the 3 that happen to be easy to remember).
+
+Exactly when each adapter runs it:
+
+| State | Run `session set --state <STATE>`... |
+| --- | --- |
+| INIT | Immediately after sending the INIT control message |
+| PLAN | After receiving PLAN from ChatGPT, before starting execution |
+| EXECUTED | After local execution/record (`c2c record`) completes, before sending the EXECUTED control message |
+| DONE | When DONE is received from ChatGPT |
+| BLOCKED | When BLOCKED is received from ChatGPT |
+
+Session-checkpoint flags (`--protocol-state`, `--waiting-for`, `--goal`,
+`--known-issues`, `--next-step`, ...) may be passed on the SAME `session set`
+call that carries `--state` — there is no need for a separate call, and
+Codex's Skill already does this (see `skill/SKILL.md`).
+
+Never build a separate Kokuban producer, a separate command, or call
+Kokuban's API (`reportKokubanTransition()`) directly from a Skill. The
+existing `session set --state` call is the only integration point; adding a
+second path risks double-reporting the same transition (or reporting one
+adapter's transitions through a different, undertested path than the
+other's) for no benefit `session set` doesn't already provide.
+
 ## Message format
 
 Every control message starts with `[C2C]` and key-value headers, then sections.

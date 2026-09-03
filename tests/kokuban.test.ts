@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deriveKokubanExtras, reportKokubanTransition } from "../src/session/kokuban.js";
-import type { KokubanConfig } from "../src/workspace/manager.js";
+import type { EffectiveKokubanConfig } from "../src/session/kokuban-config.js";
 import type { TaskCheckpoint } from "../src/session/state.js";
 
-const BASE_CONFIG: KokubanConfig = { projectKey: "bluecabi-personal-core" };
+const BASE_CONFIG: EffectiveKokubanConfig = { projectKey: "bluecabi-personal-core" };
 
 afterEach(() => {
   vi.unstubAllGlobals();

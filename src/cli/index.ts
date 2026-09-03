@@ -390,6 +390,19 @@ program
       else say("Bridge 未运行。使用 `c2c start` 启动。");
       return;
     }
+    if (observation.state === "stale") {
+      // Our own bridge is dead; its old port now belongs to a different,
+      // live workspace. Read-only status must never contact that other
+      // workspace's bridge (observation.runtime.port/adminToken point at
+      // it, not at anything of ours) -- report the stale state and stop,
+      // exactly like "stopped", without ever reaching adminFetch below.
+      if (opts.json) {
+        say(JSON.stringify({ ok: false, running: false, state: "stale", reason: observation.reason }));
+      } else {
+        say("旧 Bridge 已停止运行，其端口现由另一个 workspace 的 Bridge 合法占用。使用 `c2c doctor --fix` 或 `c2c start` 可安全重新生成。");
+      }
+      return;
+    }
     const runtime = observation.runtime;
     const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
     if (opts.json) {
@@ -466,10 +479,19 @@ program
       } else if (observation.state === "unknown") {
         bridgeUnknown = true;
         report.bridge = { ok: false, detail: `状态无法确认（${observation.reason}），未自动修复` };
+      } else if (observation.state === "stale" && !opts.fix) {
+        // Distinct from "unknown": this one IS safe to auto-repair (our own
+        // pid is confirmed dead), just not attempted without --fix.
+        report.bridge = {
+          ok: false,
+          detail: "旧 Bridge 已停止运行，其端口现由另一个 workspace 的 Bridge 合法占用；执行 doctor --fix 可安全重新生成",
+        };
       } else if (opts.fix) {
         try {
           runtime = (await ensureBridge(root)).runtime;
-          results.push("已自动启动 Bridge");
+          results.push(
+            observation.state === "stale" ? "检测到旧 Bridge 状态已失效（端口已被其他 workspace 占用），已安全丢弃并重新生成" : "已自动启动 Bridge"
+          );
         } catch (error) {
           report.bridge = { ok: false, detail: (error as Error).message };
         }

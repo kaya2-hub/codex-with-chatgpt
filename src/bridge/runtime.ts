@@ -18,6 +18,18 @@ export interface RuntimeState {
   adminToken: string;
   publicUrl: string | null;
   startedAt: string;
+  /**
+   * Fresh random id minted by each bridge instance at startup (never
+   * reused, never derived from pid/port). Exists purely so a stale-state
+   * repair can be *proven* to have produced a genuinely new instance
+   * (see runtime.test.ts) rather than inferring it from port/pid alone --
+   * it is NOT itself what gates the stale/unknown safety decision below
+   * (that's the recorded pid's liveness, which is verifiable from outside
+   * the process; a generation can only ever be confirmed by asking the
+   * process itself, which is exactly what's unreachable in the cases that
+   * matter here).
+   */
+  generation: string;
 }
 
 export function runtimeFile(workspaceId: string): string {
@@ -45,6 +57,7 @@ export interface HealthPayload {
   version: string;
   workspaceId: string;
   status: string;
+  generation: string;
 }
 
 /** Probe a port and check whether a healthy c2c bridge for the workspace answers. */
@@ -69,7 +82,8 @@ export async function probeBridge(
 export type BridgeObservation =
   | { state: "healthy"; runtime: RuntimeState }
   | { state: "stopped"; runtime: RuntimeState | null; reason: "runtime_missing" | "pid_missing" }
-  | { state: "unknown"; runtime: RuntimeState | null; reason: "probe_failed" | "pid_unknown" | "workspace_mismatch" };
+  | { state: "unknown"; runtime: RuntimeState | null; reason: "probe_failed" | "pid_unknown" | "workspace_mismatch" }
+  | { state: "stale"; runtime: RuntimeState; reason: "dead_pid_port_reclaimed_elsewhere" };
 
 function observePid(pid: number): "present" | "missing" | "unknown" {
   if (!Number.isInteger(pid) || pid <= 0) return "unknown";
@@ -83,7 +97,9 @@ function observePid(pid: number): "present" | "missing" | "unknown" {
 
 /**
  * Distinguish a dead bridge from a probe that simply failed.
- * Read-only: never starts, stops, or clears runtime.
+ * Read-only: never starts, stops, or clears runtime -- callers (ensureBridge,
+ * stopBridge) decide what, if anything, to do about a "stale" or "unknown"
+ * result.
  */
 export async function findBridgeObservation(workspaceId: string): Promise<BridgeObservation> {
   const runtime = readRuntimeState(workspaceId);
@@ -94,6 +110,20 @@ export async function findBridgeObservation(workspaceId: string): Promise<Bridge
     return { state: "healthy", runtime };
   }
   if (health) {
+    // The port now answers as a different, live workspace. Reclaiming our
+    // own stale pointer is only ever safe when OUR OWN recorded process is
+    // confirmed gone -- that other workspace's bridge is never inspected
+    // any further than this, and is never signaled or shut down from here
+    // or from any caller acting on a "stale" result. If our pid is still
+    // alive, we cannot explain what's running there (in every case seen so
+    // far this means our bridge died without reaching its graceful
+    // shutdown -- e.g. the whole session/terminal was torn down -- and the
+    // OS later handed that same port to a different workspace's fresh
+    // bridge); staying conservative and refusing is deliberate.
+    const pid = observePid(runtime.pid);
+    if (pid === "missing") {
+      return { state: "stale", runtime, reason: "dead_pid_port_reclaimed_elsewhere" };
+    }
     return { state: "unknown", runtime, reason: "workspace_mismatch" };
   }
 

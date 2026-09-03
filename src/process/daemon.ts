@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDir, getStateDir } from "../config/paths.js";
-import { findBridgeObservation, findLiveBridge, probeBridge, readRuntimeState, type RuntimeState } from "../bridge/runtime.js";
+import { clearRuntimeState, findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
 import { Workspace } from "../workspace/manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -51,6 +51,18 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
     throw new Error(
       `Bridge state is uncertain (${observation.reason}); refusing to start another bridge.`
     );
+  }
+  if (observation.state === "stale") {
+    // Our own bridge died without reaching its graceful shutdown (which
+    // would have cleared this file itself -- see server.ts's shutdown()),
+    // and its old port has since been legitimately claimed by a different
+    // workspace's live bridge. That other bridge is never touched here --
+    // only our own stale pointer is discarded. The fresh spawn below never
+    // reuses the stale port itself: it asks for the same DEFAULT_PORT every
+    // fresh start prefers, and server.ts's listen() already falls back to
+    // an OS-assigned ephemeral port on EADDRINUSE if something (including
+    // that other workspace) is still holding it.
+    clearRuntimeState(workspace.id);
   }
 
   const logDir = ensureDir(path.join(getStateDir(), "logs"));
@@ -112,23 +124,44 @@ export async function adminFetch<T = unknown>(
   }
 }
 
+/**
+ * Stop the bridge for this workspace, if any. Never signals a pid whose
+ * identity as *this workspace's* bridge isn't confirmed by a live health
+ * check first -- a recorded pid can outlive the process it once named (the
+ * OS is free to reuse it for something entirely unrelated), and blind-
+ * signaling it was the exact bug this replaced: `workspace_mismatch` and
+ * `probe_failed` used to fall through to `process.kill(runtime.pid, ...)`
+ * unconditionally.
+ */
 export async function stopBridge(workspaceRoot: string): Promise<boolean> {
   const workspace = new Workspace(workspaceRoot);
-  const runtime = readRuntimeState(workspace.id);
-  if (!runtime) return false;
-  const healthy = await probeBridge(runtime.port);
-  if (healthy && healthy.workspaceId === workspace.id) {
+  const observation = await findBridgeObservation(workspace.id);
+
+  if (observation.state === "healthy") {
     try {
-      await adminFetch(runtime, "POST", "/admin/shutdown", 5000);
+      await adminFetch(observation.runtime, "POST", "/admin/shutdown", 5000);
       return true;
     } catch {
-      // fall through to kill
+      // Identity was just confirmed live via that health check above; the
+      // admin call itself failing (not the identity) is the only reason
+      // left to fall back to a direct signal here.
+      try {
+        process.kill(observation.runtime.pid, "SIGTERM");
+        return true;
+      } catch {
+        return false;
+      }
     }
   }
-  try {
-    process.kill(runtime.pid, "SIGTERM");
+
+  if (observation.state === "stale") {
+    // Our own bridge is already dead (see findBridgeObservation) -- there
+    // is nothing left to signal, just drop the stale pointer.
+    clearRuntimeState(workspace.id);
     return true;
-  } catch {
-    return false;
   }
+
+  // "stopped": nothing recorded, nothing to do. "unknown": the recorded
+  // pid may have been reused by an unrelated process -- never guess.
+  return false;
 }

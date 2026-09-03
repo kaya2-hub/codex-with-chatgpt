@@ -101,6 +101,9 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   // workspace's persisted `named` preference.
   let activeTunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
+  // Fresh per process start, never reused -- see RuntimeState.generation's
+  // doc comment for what this is (and isn't) for.
+  const generation = randomBytes(9).toString("base64url");
 
   let publicBaseUrl: string | null = null;
 
@@ -118,7 +121,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   // ---- Health (public but minimal) ---------------------------------------
 
   app.get("/health", (_req, res) => {
-    res.json({ service: SERVICE_NAME, version: VERSION, workspaceId: workspace.id, status: "ok" });
+    res.json({ service: SERVICE_NAME, version: VERSION, workspaceId: workspace.id, status: "ok", generation });
   });
 
   // ---- OAuth + discovery ---------------------------------------------------
@@ -275,6 +278,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       adminToken,
       publicUrl: publicBaseUrl,
       startedAt,
+      generation,
     };
     writeRuntimeState(state);
   };

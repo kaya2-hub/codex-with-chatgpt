@@ -3,7 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDir, getStateDir } from "../config/paths.js";
-import { clearRuntimeState, findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
+import {
+  clearRuntimeState,
+  findBridgeObservation,
+  findLiveBridge,
+  observePid,
+  type RuntimeState,
+} from "../bridge/runtime.js";
 import { Workspace } from "../workspace/manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -94,6 +100,20 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
     const runtime = await findLiveBridge(workspace.id);
     if (runtime) return { runtime, spawned: true };
     if (child.exitCode !== null && child.exitCode !== 0) {
+      // The most common reason this child exits immediately: it lost the
+      // workspace's single-instance ownership lock (see bridge/lock.ts) to
+      // an already-alive bridge -- exactly what happens when THIS call's
+      // own earlier `findBridgeObservation()` above was misled by a
+      // transient health-probe failure against a bridge that was actually
+      // fine. Re-check once, now, before reporting failure: if a real
+      // bridge answers healthy at this point (very likely the one that won
+      // the lock), converge on it rather than surfacing a spurious error --
+      // this is what makes "ensureBridge() from a second process while the
+      // first is merely slow to answer" resolve to the SAME instance
+      // instead of erroring (connector reliability hardening, independent
+      // review 2026-09-03).
+      const recheck = await findBridgeObservation(workspace.id);
+      if (recheck.state === "healthy") return { runtime: recheck.runtime, spawned: false };
       throw new Error(`Bridge process exited with code ${child.exitCode}. See ${logFile}`);
     }
   }
@@ -139,26 +159,35 @@ export async function adminFetch<T = unknown>(
  * signaling it was the exact bug this replaced: `workspace_mismatch` and
  * `probe_failed` used to fall through to `process.kill(runtime.pid, ...)`
  * unconditionally.
+ *
+ * Only ever returns `true` once the old process is CONFIRMED gone (see
+ * `waitForPidExit`) -- never merely because `/admin/shutdown` answered.
+ * That route (server.ts) responds before the real shutdown work runs, so
+ * trusting the HTTP response alone races a still-alive old process. This
+ * was a real, live bug: `c2c restart` reported success while reusing the
+ * exact same PID, because `ensureBridge()`'s "reuse a healthy instance"
+ * check ran before the old process had actually exited (independent
+ * review, 2026-09-03 -- connector reliability hardening PRIORITY F).
  */
 export async function stopBridge(workspaceRoot: string): Promise<boolean> {
   const workspace = new Workspace(workspaceRoot);
   const observation = await findBridgeObservation(workspace.id);
 
   if (observation.state === "healthy") {
+    const pid = observation.runtime.pid;
     try {
       await adminFetch(observation.runtime, "POST", "/admin/shutdown", 5000);
-      return true;
     } catch {
       // Identity was just confirmed live via that health check above; the
       // admin call itself failing (not the identity) is the only reason
       // left to fall back to a direct signal here.
       try {
-        process.kill(observation.runtime.pid, "SIGTERM");
-        return true;
+        process.kill(pid, "SIGTERM");
       } catch {
         return false;
       }
     }
+    return await waitForPidExit(workspace.id, pid);
   }
 
   if (observation.state === "stale") {
@@ -170,5 +199,29 @@ export async function stopBridge(workspaceRoot: string): Promise<boolean> {
 
   // "stopped": nothing recorded, nothing to do. "unknown": the recorded
   // pid may have been reused by an unrelated process -- never guess.
+  return false;
+}
+
+/**
+ * Block until `pid` is confirmed gone (bounded, honest -- returns `false`,
+ * never a false `true`, if it outlives the deadline). This is what makes
+ * `stopBridge`'s return value trustworthy enough for a caller to safely
+ * call `ensureBridge()` immediately afterward and know any "healthy"
+ * result it gets back is necessarily a NEW process, not the old one still
+ * finishing its shutdown.
+ */
+async function waitForPidExit(workspaceId: string, pid: number, timeoutMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (observePid(pid) === "missing") {
+      // The old process may have been killed before its own shutdown()
+      // reached clearRuntimeState() (e.g. the SIGTERM fallback above) --
+      // drop our own stale pointer here too so the very next
+      // findBridgeObservation() sees "stopped", never a leftover "unknown".
+      clearRuntimeState(workspaceId);
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
   return false;
 }

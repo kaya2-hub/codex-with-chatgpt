@@ -5,6 +5,7 @@ import { PairingManager } from "../pairing/manager.js";
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME } from "../version.js";
 import { escapeHtml, setAuthSecurityHeaders } from "./html.js";
+import { logOAuthEvent } from "./oauth-log.js";
 
 export interface OAuthDeps {
   store: AuthStore;
@@ -12,28 +13,32 @@ export interface OAuthDeps {
   workspaceName: string;
   getBaseUrl: (req: Request) => string;
   logger: Logger;
+  /** This bridge process's own generation id -- threaded into every OAuth
+   *  log line so a reader can tell whether a request pair straddled a
+   *  restart (see oauth-log.ts). */
+  generation?: string;
   /** Called once a `POST /oauth/token` authorization_code exchange actually
    *  succeeds, with the ORIGIN THE REQUEST ITSELF ARRIVED ON (`req.protocol`
-   *  + `req.get("host")` — never the configured/desired public URL). The
-   *  caller must compare this against what it currently believes the
-   *  public URL to be, and only then record a "confirmed" endpoint — see
-   *  connectorConfirmation.ts. A request that arrived over loopback (a
+   *  + `req.get("host")` — never the configured/desired public URL) and the
+   *  exchanging client's id. The caller must compare the origin against
+   *  what it currently believes the public URL to be, and must exclude its
+   *  own OAuth self-test client, before recording a "confirmed" endpoint —
+   *  see connectorConfirmation.ts. A request that arrived over loopback (a
    *  local admin call, a test hitting `bridge.localBaseUrl()`, an internal
    *  retry) must never be able to confirm the public tunnel URL just
-   *  because one happens to be configured. */
-  onAuthorizationCodeExchanged?: (requestOrigin: string) => void;
+   *  because one happens to be configured -- and neither must doctor's own
+   *  diagnostic self-test round trip, regardless of what URL is
+   *  configured. */
+  onAuthorizationCodeExchanged?: (requestOrigin: string, clientId: string) => void;
 }
 
-interface PendingAuthRequest {
-  id: string;
-  clientId: string;
-  redirectUri: string;
-  scopes: string[];
-  state?: string;
-  codeChallenge: string;
-  resource?: string;
-  expiresAt: number;
-}
+/** Independent review, 2026-09-03: an already-"consumed" pending request
+ *  (its pairing code was already proven correct once) can be safely
+ *  re-issued a fresh authorization code -- browser double-submit, a
+ *  back-button resubmit, a downstream redirect/exchange failure on
+ *  ChatGPT's own side -- without asking for the pairing code again. Capped
+ *  so a stuck client can't mint authorization codes indefinitely. */
+const MAX_PENDING_AUTH_RETRIES = 5;
 
 function isAllowedRedirectUri(uri: string): boolean {
   let parsed: URL;
@@ -146,14 +151,9 @@ function pairingPage(opts: {
 
 export function createOAuthRouter(deps: OAuthDeps): Router {
   const router = Router();
-  const pendingRequests = new Map<string, PendingAuthRequest>();
-
-  const prunePending = (): void => {
-    const now = Date.now();
-    for (const [id, request] of pendingRequests) {
-      if (now > request.expiresAt) pendingRequests.delete(id);
-    }
-  };
+  const correlationId = (): string => randomBytes(6).toString("hex");
+  const log = (event: Omit<Parameters<typeof logOAuthEvent>[1], "correlationId" | "generation"> & { correlationId: string }): void =>
+    logOAuthEvent(deps.logger, { ...event, generation: deps.generation });
 
   // ---- Discovery metadata -------------------------------------------------
 
@@ -172,12 +172,14 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
   // ---- Dynamic Client Registration (RFC 7591) ------------------------------
 
   router.post("/oauth/register", json(), (req, res) => {
+    const cid = correlationId();
     const body = req.body as { client_name?: string; redirect_uris?: unknown };
     const redirectUris = Array.isArray(body.redirect_uris) ? body.redirect_uris : [];
     if (
       redirectUris.length === 0 ||
       !redirectUris.every((uri) => typeof uri === "string" && isAllowedRedirectUri(uri))
     ) {
+      log({ route: "register", method: "POST", outcome: "rejected", reason: "invalid_redirect_uri", correlationId: cid });
       res.status(400).json({
         error: "invalid_redirect_uri",
         error_description: "redirect_uris must be https URLs (or http://localhost for development)",
@@ -189,6 +191,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       redirectUris: redirectUris as string[],
     });
     deps.logger.info(`Registered OAuth client ${client.clientId} (${client.clientName ?? "unnamed"})`);
+    log({ route: "register", method: "POST", outcome: "accepted", clientId: client.clientId, correlationId: cid });
     res.status(201).json({
       client_id: client.clientId,
       client_name: client.clientName,
@@ -202,21 +205,24 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
   // ---- Authorization endpoint ----------------------------------------------
 
   router.get("/oauth/authorize", (req, res) => {
-    prunePending();
+    const cid = correlationId();
     const query = req.query as Record<string, string | undefined>;
     const client = query.client_id ? deps.store.getClient(query.client_id) : undefined;
     if (!client) {
+      log({ route: "authorize", method: "GET", outcome: "rejected", reason: "unknown_client", clientId: query.client_id, correlationId: cid });
       setAuthSecurityHeaders(res);
       res.status(400).send("Unknown client. Please reconnect from ChatGPT.");
       return;
     }
     const redirectUri = query.redirect_uri;
     if (!redirectUri || !client.redirectUris.includes(redirectUri)) {
+      log({ route: "authorize", method: "GET", outcome: "rejected", reason: "redirect_uri_mismatch", clientId: client.clientId, correlationId: cid });
       setAuthSecurityHeaders(res);
       res.status(400).send("Invalid redirect_uri.");
       return;
     }
-    const fail = (error: string, description: string): void => {
+    const fail = (error: string, description: string, reason: string): void => {
+      log({ route: "authorize", method: "GET", outcome: "rejected", reason, clientId: client.clientId, correlationId: cid });
       const url = new URL(redirectUri);
       url.searchParams.set("error", error);
       url.searchParams.set("error_description", description);
@@ -224,31 +230,30 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       res.redirect(url.toString());
     };
     if (query.response_type !== "code") {
-      fail("unsupported_response_type", "Only response_type=code is supported");
+      fail("unsupported_response_type", "Only response_type=code is supported", "unsupported_response_type");
       return;
     }
     if (!query.code_challenge || query.code_challenge_method !== "S256") {
-      fail("invalid_request", "PKCE with S256 is required");
+      fail("invalid_request", "PKCE with S256 is required", "invalid_pkce_request");
       return;
     }
     const scopes = filterScopes(query.scope);
     if (scopes.length === 0) {
       // query.scope was non-empty but named only unsupported values —
       // never fall back to granting everything (see filterScopes).
-      fail("invalid_scope", "None of the requested scopes are supported by this server");
+      fail("invalid_scope", "None of the requested scopes are supported by this server", "invalid_scope");
       return;
     }
-    const request: PendingAuthRequest = {
-      id: randomBytes(16).toString("hex"),
+    const request = deps.store.createPendingAuthRequest({
       clientId: client.clientId,
       redirectUri,
       scopes,
       state: query.state,
       codeChallenge: query.code_challenge,
       resource: query.resource,
-      expiresAt: Date.now() + 10 * 60_000,
-    };
-    pendingRequests.set(request.id, request);
+      ttlMs: 10 * 60_000,
+    });
+    log({ route: "authorize", method: "GET", outcome: "accepted", clientId: client.clientId, requestId: request.id, correlationId: cid });
     setAuthSecurityHeaders(res);
     res
       .status(200)
@@ -257,14 +262,63 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
   });
 
   router.post("/oauth/authorize", urlencoded({ extended: false }), (req, res) => {
-    prunePending();
+    const cid = correlationId();
     const body = req.body as { request_id?: string; pairing_code?: string };
-    const request = body.request_id ? pendingRequests.get(body.request_id) : undefined;
+    const requestId = body.request_id;
+    const request = requestId ? deps.store.getPendingAuthRequest(requestId) : undefined;
+
     if (!request) {
+      // Independent review, 2026-09-03: deliberately a DIFFERENT message
+      // from "expired" -- this request_id was never issued, or its
+      // (unconditional, TTL-bounded) prune already removed it. "Expired"
+      // below is reserved for a request that WAS found but is genuinely
+      // past its original window; conflating the two made every failure
+      // mode look identical to the user.
+      log({ route: "authorize", method: "POST", outcome: "rejected", reason: "request_not_found", requestId, correlationId: cid });
       setAuthSecurityHeaders(res);
-      res.status(400).send("This authorization request has expired. Please reconnect from ChatGPT.");
+      res.status(400).send("Unknown authorization request. Please reconnect from ChatGPT.");
       return;
     }
+
+    const redirectWithCode = (code: string): void => {
+      const url = new URL(request.redirectUri);
+      url.searchParams.set("code", code);
+      if (request.state) url.searchParams.set("state", request.state);
+      res.redirect(url.toString());
+    };
+
+    if (request.status === "consumed") {
+      // IDEMPOTENT RETRY (independent review, 2026-09-03): this pairing
+      // code was already proven correct once for this exact request. A
+      // second POST here — browser double-submit, a back-button resubmit,
+      // a downstream failure on ChatGPT's own side after the first
+      // redirect — must not present the old, ambiguous "expired" message
+      // (that was the actual reproduction of "1st Connect: no visible
+      // change, 2nd Connect: expired"). Safely re-issue a FRESH,
+      // single-use authorization code for the SAME client/redirect/PKCE
+      // and redirect again, bounded by a retry cap.
+      if (request.retryCount >= MAX_PENDING_AUTH_RETRIES) {
+        log({ route: "authorize", method: "POST", outcome: "rejected", reason: "retry_limit_exceeded", requestId: request.id, clientId: request.clientId, correlationId: cid });
+        setAuthSecurityHeaders(res);
+        res.status(429).send("Too many attempts for this connection request. Please reconnect from ChatGPT.");
+        return;
+      }
+      deps.store.incrementPendingAuthRequestRetry(request.id);
+      const code = deps.store.createAuthorizationCode({
+        clientId: request.clientId,
+        redirectUri: request.redirectUri,
+        codeChallenge: request.codeChallenge,
+        scopes: request.scopes,
+        pairingSessionId: "retry",
+        resource: request.resource,
+      });
+      deps.logger.info(`Re-issued authorization code for already-verified request (client ${request.clientId})`);
+      log({ route: "authorize", method: "POST", outcome: "accepted", reason: "idempotent_retry", requestId: request.id, clientId: request.clientId, correlationId: cid });
+      redirectWithCode(code);
+      return;
+    }
+
+    // status === "pending": first attempt, needs real pairing-code verification.
     const verdict = deps.pairing.verify(body.pairing_code ?? "", req.ip);
     if (!verdict.ok) {
       const messages: Record<string, string> = {
@@ -275,6 +329,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
         no_active_session: "No active pairing session. Ask your coding agent to generate a pairing code.",
       };
       deps.logger.warn(`Pairing verification failed: ${verdict.reason}`);
+      log({ route: "authorize", method: "POST", outcome: "rejected", reason: `pairing_${verdict.reason}`, requestId: request.id, clientId: request.clientId, correlationId: cid });
       setAuthSecurityHeaders(res);
       res
         .status(verdict.reason === "invalid" ? 401 : 410)
@@ -289,7 +344,8 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
         );
       return;
     }
-    pendingRequests.delete(request.id);
+
+    deps.store.markPendingAuthRequestConsumed(request.id);
     const code = deps.store.createAuthorizationCode({
       clientId: request.clientId,
       redirectUri: request.redirectUri,
@@ -299,45 +355,55 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       resource: request.resource,
     });
     deps.logger.info(`Pairing verified; issued authorization code for client ${request.clientId}`);
-    const url = new URL(request.redirectUri);
-    url.searchParams.set("code", code);
-    if (request.state) url.searchParams.set("state", request.state);
-    res.redirect(url.toString());
+    log({ route: "authorize", method: "POST", outcome: "accepted", reason: "pairing_verified", requestId: request.id, clientId: request.clientId, correlationId: cid });
+    redirectWithCode(code);
   });
 
   // ---- Token endpoint --------------------------------------------------------
 
   router.post("/oauth/token", urlencoded({ extended: false }), json(), (req, res) => {
+    const cid = correlationId();
     const body = req.body as Record<string, string | undefined>;
     const grantType = body.grant_type;
 
     if (grantType === "authorization_code") {
       const { code, code_verifier: codeVerifier, client_id: clientId, redirect_uri: redirectUri } = body;
       if (!code || !codeVerifier || !clientId) {
+        log({ route: "token", method: "POST", outcome: "rejected", reason: "invalid_request", clientId, correlationId: cid });
         res.status(400).json({ error: "invalid_request" });
         return;
       }
       const record = deps.store.consumeAuthorizationCode(code);
       if (!record || record.clientId !== clientId) {
+        log({ route: "token", method: "POST", outcome: "rejected", reason: "invalid_grant_code", clientId, correlationId: cid });
         res.status(400).json({ error: "invalid_grant" });
         return;
       }
       if (redirectUri && redirectUri !== record.redirectUri) {
+        log({ route: "token", method: "POST", outcome: "rejected", reason: "redirect_uri_mismatch", clientId, correlationId: cid });
         res.status(400).json({ error: "invalid_grant", error_description: "redirect_uri mismatch" });
         return;
       }
       if (!safeEqual(base64UrlSha256(codeVerifier), record.codeChallenge)) {
         deps.logger.warn("PKCE verification failed at token endpoint");
+        log({ route: "token", method: "POST", outcome: "rejected", reason: "pkce_mismatch", clientId, correlationId: cid });
         res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
         return;
       }
       const tokens = deps.store.issueTokens({ clientId, scopes: record.scopes });
       deps.logger.info(`Issued access token for client ${clientId}`);
+      log({ route: "token", method: "POST", outcome: "accepted", reason: "authorization_code", clientId, correlationId: cid });
       // This is potential proof an external OAuth client completed a live
       // round trip — but only if the request itself actually arrived via
-      // the public origin, not loopback. The caller (server.ts) verifies
-      // that before recording anything as confirmed.
-      deps.onAuthorizationCodeExchanged?.(`${req.protocol}://${req.get("host") ?? ""}`);
+      // the public origin, not loopback, AND the exchanging client isn't
+      // doctor's own OAuth self-test client (independent review,
+      // 2026-09-03: a diagnostic round trip doctor runs against itself
+      // must never be able to masquerade as proof a real external client
+      // connected — the same principle issueSelfTestToken() already
+      // applies by excluding self-test tokens from
+      // hasUsableAuthorization()/tokenCount()). The caller (server.ts)
+      // verifies both before recording anything as confirmed.
+      deps.onAuthorizationCodeExchanged?.(`${req.protocol}://${req.get("host") ?? ""}`, clientId);
       res.json({
         access_token: tokens.accessToken,
         token_type: "Bearer",
@@ -351,14 +417,17 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     if (grantType === "refresh_token") {
       const { refresh_token: refreshToken, client_id: clientId } = body;
       if (!refreshToken || !clientId) {
+        log({ route: "token", method: "POST", outcome: "rejected", reason: "invalid_request", clientId, correlationId: cid });
         res.status(400).json({ error: "invalid_request" });
         return;
       }
       const result = deps.store.refresh(refreshToken, clientId);
       if (!result.ok) {
+        log({ route: "token", method: "POST", outcome: "rejected", reason: `refresh_${result.reason}`, clientId, correlationId: cid });
         res.status(400).json({ error: result.reason });
         return;
       }
+      log({ route: "token", method: "POST", outcome: "accepted", reason: "refresh_token", clientId, correlationId: cid });
       res.json({
         access_token: result.tokens.accessToken,
         token_type: "Bearer",
@@ -369,14 +438,17 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       return;
     }
 
+    log({ route: "token", method: "POST", outcome: "rejected", reason: "unsupported_grant_type", correlationId: cid });
     res.status(400).json({ error: "unsupported_grant_type" });
   });
 
   // ---- Revocation (RFC 7009) ---------------------------------------------------
 
   router.post("/oauth/revoke", urlencoded({ extended: false }), (req, res) => {
+    const cid = correlationId();
     const body = req.body as { token?: string };
-    if (body.token) deps.store.revokeToken(body.token);
+    const revoked = body.token ? deps.store.revokeToken(body.token) : false;
+    log({ route: "revoke", method: "POST", outcome: revoked ? "accepted" : "rejected", reason: revoked ? undefined : "token_unknown", correlationId: cid });
     res.status(200).json({});
   });
 

@@ -20,8 +20,12 @@ export interface ClientRegistration {
   createdAt: string;
 }
 
-export interface AuthorizationCodeRecord {
-  code: string;
+/** On-disk shape: the authorization code itself is never persisted, only a
+ *  SHA-256 hash of it (same pattern as TokenRecord) -- a one-time-use OAuth
+ *  authorization code is a bearer credential exactly like an access token,
+ *  so it gets the same "never store the plaintext" treatment. */
+interface PersistedAuthorizationCode {
+  hash: string;
   clientId: string;
   redirectUri: string;
   codeChallenge: string;
@@ -30,6 +34,49 @@ export interface AuthorizationCodeRecord {
   pairingSessionId: string;
   resource?: string;
   expiresAt: number;
+}
+
+export interface AuthorizationCodeRecord {
+  clientId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  scopes: string[];
+  workspaceId: string;
+  pairingSessionId: string;
+  resource?: string;
+  expiresAt: number;
+}
+
+export type PendingAuthRequestStatus = "pending" | "consumed";
+
+/**
+ * Durable record of one `GET /oauth/authorize` request, from creation
+ * through pairing verification and any safe retries -- independent review
+ * (2026-09-03, OAuth connector reliability): this used to be a plain
+ * in-memory Map local to the OAuth router's closure, wiped on every bridge
+ * restart, which is exactly what turned a routine restart mid-pairing into
+ * "This authorization request has expired." Contains no secret: `id` is a
+ * capability the user's own browser already holds (it's sent to them in
+ * the pairing page's hidden form field); `codeChallenge` is PKCE's public
+ * half by design; nothing else here is credential-shaped at all.
+ */
+export interface PendingAuthRequestRecord {
+  id: string;
+  clientId: string;
+  redirectUri: string;
+  scopes: string[];
+  state?: string;
+  codeChallenge: string;
+  resource?: string;
+  createdAt: number;
+  expiresAt: number;
+  status: PendingAuthRequestStatus;
+  /** Bumped each time an already-"consumed" request is safely re-issued a
+   *  fresh authorization code (browser double-submit, retry after a
+   *  downstream redirect/exchange failure) -- capped by the caller
+   *  (MAX_PENDING_AUTH_RETRIES in oauth.ts) so a stuck client can't mint
+   *  unlimited codes forever. */
+  retryCount: number;
 }
 
 export interface TokenRecord {
@@ -53,6 +100,8 @@ export interface TokenRecord {
 interface PersistedAuthState {
   clients: ClientRegistration[];
   tokens: TokenRecord[];
+  pendingAuthRequests?: PendingAuthRequestRecord[];
+  authorizationCodes?: PersistedAuthorizationCode[];
 }
 
 export type VerifyTokenResult =
@@ -93,7 +142,8 @@ export function safeEqual(a: string, b: string): boolean {
 export class AuthStore {
   private clients = new Map<string, ClientRegistration>();
   private tokens = new Map<string, TokenRecord>();
-  private authCodes = new Map<string, AuthorizationCodeRecord>();
+  private authCodes = new Map<string, PersistedAuthorizationCode>();
+  private pendingAuthRequests = new Map<string, PendingAuthRequestRecord>();
   private readonly file: string;
 
   constructor(
@@ -118,6 +168,12 @@ export class AuthStore {
       if (token.kind === "self_test") continue;
       if (!token.revoked && token.expiresAt > now) this.tokens.set(token.hash, token);
     }
+    for (const code of data.authorizationCodes ?? []) {
+      if (code.expiresAt > now) this.authCodes.set(code.hash, code);
+    }
+    for (const request of data.pendingAuthRequests ?? []) {
+      if (request.expiresAt > now) this.pendingAuthRequests.set(request.id, request);
+    }
   }
 
   private save(): void {
@@ -131,6 +187,8 @@ export class AuthStore {
       // registration, another token's revoke, or another concurrent
       // doctor invocation's own self-test token). See issueSelfTestToken().
       tokens: [...this.tokens.values()].filter((t) => t.kind !== "self_test" && !t.revoked && t.expiresAt > now),
+      authorizationCodes: [...this.authCodes.values()].filter((c) => c.expiresAt > now),
+      pendingAuthRequests: [...this.pendingAuthRequests.values()].filter((r) => r.expiresAt > now),
     };
     writeSecureJson(this.file, state);
   }
@@ -153,6 +211,26 @@ export class AuthStore {
     return this.clients.get(clientId);
   }
 
+  /** Removes a client registration -- currently only used to keep the store
+   *  clean after `doctor`'s own OAuth self-test client (see
+   *  src/auth/oauth-self-test.ts), never for a real ChatGPT/Codex client:
+   *  "recreate the client" must never be the answer to a real connector
+   *  problem (independent review, 2026-09-03). Also revokes any tokens
+   *  still issued to it, so a removed client can't keep authenticating on
+   *  credentials issued before removal. */
+  unregisterClient(clientId: string): boolean {
+    const existed = this.clients.delete(clientId);
+    if (!existed) return false;
+    for (const [hash, token] of this.tokens) {
+      if (token.clientId === clientId) this.tokens.delete(hash);
+    }
+    for (const [hash, code] of this.authCodes) {
+      if (code.clientId === clientId) this.authCodes.delete(hash);
+    }
+    this.save();
+    return true;
+  }
+
   // ---- Authorization codes ----------------------------------------------
 
   createAuthorizationCode(input: {
@@ -164,8 +242,8 @@ export class AuthStore {
     resource?: string;
   }): string {
     const code = newToken("c2c_ac");
-    this.authCodes.set(code, {
-      code,
+    this.authCodes.set(sha256hex(code), {
+      hash: sha256hex(code),
       clientId: input.clientId,
       redirectUri: input.redirectUri,
       codeChallenge: input.codeChallenge,
@@ -175,16 +253,109 @@ export class AuthStore {
       resource: input.resource,
       expiresAt: Date.now() + AUTH_CODE_TTL_MS,
     });
+    this.save();
     return code;
   }
 
-  /** One-time consumption of an authorization code. */
+  /** One-time consumption of an authorization code -- durable across a
+   *  bridge restart (independent review, 2026-09-03: this used to be a
+   *  plain in-memory Map, wiped on restart, the same class of bug as the
+   *  pending-authorize-request map below). Only the code's SHA-256 hash is
+   *  ever persisted, matching TokenRecord's own "never store the plaintext
+   *  bearer credential" convention. */
   consumeAuthorizationCode(code: string): AuthorizationCodeRecord | null {
-    const record = this.authCodes.get(code);
+    const hash = sha256hex(code);
+    const record = this.authCodes.get(hash);
     if (!record) return null;
-    this.authCodes.delete(code);
+    this.authCodes.delete(hash);
+    this.save();
     if (Date.now() > record.expiresAt) return null;
+    const { hash: _hash, ...rest } = record;
+    return rest;
+  }
+
+  // ---- Pending OAuth authorize requests (durable across restart) ---------
+
+  /** Step 1 of the authorize flow: durably persist a fresh pending request
+   *  -- MUST be called from `GET /oauth/authorize` before the pairing page
+   *  is shown, so a bridge restart between "page shown" and "pairing code
+   *  submitted" doesn't silently drop it (see PendingAuthRequestRecord's
+   *  doc comment). */
+  createPendingAuthRequest(input: {
+    clientId: string;
+    redirectUri: string;
+    scopes: string[];
+    state?: string;
+    codeChallenge: string;
+    resource?: string;
+    ttlMs: number;
+  }): PendingAuthRequestRecord {
+    this.prunePendingAuthRequests();
+    const record: PendingAuthRequestRecord = {
+      id: randomBytes(16).toString("hex"),
+      clientId: input.clientId,
+      redirectUri: input.redirectUri,
+      scopes: input.scopes,
+      state: input.state,
+      codeChallenge: input.codeChallenge,
+      resource: input.resource,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + input.ttlMs,
+      status: "pending",
+      retryCount: 0,
+    };
+    this.pendingAuthRequests.set(record.id, record);
+    this.save();
     return record;
+  }
+
+  /** Read-only lookup, pruning expired entries opportunistically first. */
+  getPendingAuthRequest(id: string): PendingAuthRequestRecord | undefined {
+    this.prunePendingAuthRequests();
+    return this.pendingAuthRequests.get(id);
+  }
+
+  /** Marks a pending request "consumed" the FIRST time its pairing code is
+   *  verified -- deliberately does NOT delete it (independent review,
+   *  2026-09-03: the previous design deleted the pending request the
+   *  instant the pairing code checked out, BEFORE anything confirmed the
+   *  subsequent redirect + ChatGPT's own token exchange actually
+   *  succeeded -- a browser double-submit or a downstream hiccup then hit
+   *  an ambiguous "expired" error on what was, from the user's
+   *  perspective, still their first legitimate attempt). Once "consumed",
+   *  see incrementPendingAuthRequestRetry() for the safe-retry path. */
+  markPendingAuthRequestConsumed(id: string): void {
+    const record = this.pendingAuthRequests.get(id);
+    if (!record) return;
+    record.status = "consumed";
+    this.save();
+  }
+
+  /** Bumps and returns the retry counter for an idempotent re-issue of an
+   *  already-"consumed" pending request (see oauth.ts's POST handler,
+   *  which caps this at MAX_PENDING_AUTH_RETRIES). */
+  incrementPendingAuthRequestRetry(id: string): number {
+    const record = this.pendingAuthRequests.get(id);
+    if (!record) return 0;
+    record.retryCount++;
+    this.save();
+    return record.retryCount;
+  }
+
+  /** TTL-based cleanup -- called opportunistically by create/get above, so
+   *  no separate timer/process is needed. Never removes anything still
+   *  within its original 10-minute window, whether "pending" or
+   *  "consumed". */
+  private prunePendingAuthRequests(): void {
+    const now = Date.now();
+    let changed = false;
+    for (const [id, record] of this.pendingAuthRequests) {
+      if (now > record.expiresAt) {
+        this.pendingAuthRequests.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) this.save();
   }
 
   // ---- Tokens -------------------------------------------------------------
@@ -308,6 +479,7 @@ export class AuthStore {
     const count = this.tokens.size;
     this.tokens.clear();
     this.authCodes.clear();
+    this.pendingAuthRequests.clear();
     this.save();
     return count;
   }

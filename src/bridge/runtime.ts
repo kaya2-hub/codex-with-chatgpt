@@ -85,7 +85,7 @@ export type BridgeObservation =
   | { state: "unknown"; runtime: RuntimeState | null; reason: "probe_failed" | "pid_unknown" | "workspace_mismatch" }
   | { state: "stale"; runtime: RuntimeState; reason: "dead_pid_port_reclaimed_elsewhere" };
 
-function observePid(pid: number): "present" | "missing" | "unknown" {
+export function observePid(pid: number): "present" | "missing" | "unknown" {
   if (!Number.isInteger(pid) || pid <= 0) return "unknown";
   try {
     process.kill(pid, 0);

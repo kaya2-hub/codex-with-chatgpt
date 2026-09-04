@@ -1,5 +1,6 @@
 import express, { type Request, type Response, type NextFunction } from "express";
 import type { Server } from "node:http";
+import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { Workspace } from "../workspace/manager.js";
 import { AuthStore } from "../auth/store.js";
@@ -13,11 +14,13 @@ import { CloudflaredNamedTunnel } from "../tunnel/cloudflared-named.js";
 import type { TunnelProvider } from "../tunnel/provider.js";
 import { namedTunnelBinding, readTunnelState } from "../tunnel/state.js";
 import { Logger, nullLogger } from "../logger/index.js";
-import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
+import { DEFAULT_HOST, DEFAULT_PORT, ensureDir, getStateDir } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
 import { writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
+import { acquireWorkspaceLock, releaseWorkspaceLock, WorkspaceLockConflictError, type WorkspaceLockInfo } from "./lock.js";
 import { recordConnectorConfirmation } from "../config/connectorConfirmation.js";
 import { normalizePublicUrl } from "../config/endpoint.js";
+import { OAUTH_SELF_TEST_CLIENT_NAME } from "../auth/oauth-self-test.js";
 
 function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider {
   const binding = namedTunnelBinding(readTunnelState(workspaceId));
@@ -45,6 +48,11 @@ export interface BridgeOptions {
   /** Persist runtime state file (disable in tests). */
   persistRuntime?: boolean;
   authStoreFile?: string;
+  /** Explicit override for pairing-session persistence (test isolation,
+   *  matching authStoreFile). When omitted, defaults to a real per-workspace
+   *  file under getStateDir() -- see PairingManagerOptions.file's doc
+   *  comment for why this exists at all. */
+  pairingFile?: string;
   pairingTtlMs?: number;
   accessTokenTtlMs?: number;
 }
@@ -94,16 +102,54 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     throw new Error("The bridge only binds to loopback addresses. Public exposure goes through the tunnel.");
   }
 
+  // Fresh per process start, never reused -- see RuntimeState.generation's
+  // doc comment for what this is (and isn't) for. Defined this early (ahead
+  // of everything below, including the workspace lock) so the SAME value
+  // identifies this process everywhere: the lock, RuntimeState, /health,
+  // and every OAuth log line -- one process, one generation, checkable from
+  // any of those places (connector reliability hardening PRIORITY: unified
+  // canonical-bridge identity across every path).
+  const generation = randomBytes(9).toString("base64url");
+
+  // Single-instance ownership: acquire BEFORE anything else (before any
+  // port is bound, before runtime state is persisted) so a second
+  // `startBridge()` for this workspace -- however it was triggered, a
+  // spawned daemon child or a direct `c2c serve` -- fails immediately and
+  // can never become a second live, routable bridge. See lock.ts for why
+  // this exists: a client-side health-probe timeout against an already-
+  // healthy bridge is not proof it's gone, and that misclassification is
+  // exactly what created a real, live duplicate (independent review,
+  // 2026-09-03 -- connector reliability hardening). `persistRuntime: false`
+  // (test isolation) intentionally does NOT disable this -- ownership is a
+  // correctness invariant, not a production-only concern, and
+  // `isolateStateDir()` already scopes the lock file the same way it scopes
+  // everything else in tests.
+  const lockInfo: WorkspaceLockInfo = {
+    workspaceId: workspace.id,
+    pid: process.pid,
+    generation,
+    createdAt: new Date().toISOString(),
+  };
+  const lockResult = acquireWorkspaceLock(lockInfo);
+  if (!lockResult.ok) {
+    throw new WorkspaceLockConflictError(workspace.id, lockResult.holder);
+  }
+
   const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
-  const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
+  // Defaults to a real per-workspace file (mirroring AuthStore's own
+  // default) so a genuine bridge restart doesn't orphan a pairing code the
+  // user is mid-way through typing (independent review, 2026-09-03) --
+  // opt out via `pairingFile: undefined` is not offered on purpose;
+  // BridgeOptions.pairingFile exists only to REDIRECT persistence
+  // somewhere isolated (tests), never to disable it in production.
+  const pairingFile =
+    opts.pairingFile ?? path.join(ensureDir(path.join(getStateDir(), "auth")), `${workspace.id}-pairing.json`);
+  const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs, file: pairingFile });
   // Mutable: a Named Tunnel that fails to start falls back to a Quick
   // Tunnel for this run (see /admin/tunnel/start) without losing the
   // workspace's persisted `named` preference.
   let activeTunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
-  // Fresh per process start, never reused -- see RuntimeState.generation's
-  // doc comment for what this is (and isn't) for.
-  const generation = randomBytes(9).toString("base64url");
 
   let publicBaseUrl: string | null = null;
 
@@ -133,7 +179,8 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       workspaceName: workspace.name,
       getBaseUrl,
       logger,
-      onAuthorizationCodeExchanged: (requestOrigin: string) => {
+      generation,
+      onAuthorizationCodeExchanged: (requestOrigin: string, clientId: string) => {
         // Only record a confirmation when the token request's OWN observed
         // origin matches what we currently believe the public URL to be —
         // never just because a public URL happens to be configured. A
@@ -142,9 +189,18 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
         // the public tunnel URL; that was the exact bug this fixes (an
         // old, unrelated token/URL combination getting silently treated
         // as proof the CURRENT desired URL is reachable).
-        if (publicBaseUrl && normalizePublicUrl(requestOrigin) === normalizePublicUrl(publicBaseUrl)) {
-          recordConnectorConfirmation(workspace.id, `${publicBaseUrl}/mcp`);
-        }
+        if (!publicBaseUrl || normalizePublicUrl(requestOrigin) !== normalizePublicUrl(publicBaseUrl)) return;
+        // Independent review, 2026-09-03: doctor's own OAuth self-test
+        // (see auth/oauth-self-test.ts) makes a REAL token exchange as
+        // part of its diagnostic round trip -- if `publicBaseUrl` ever
+        // happens to equal the loopback address it uses (an unusual
+        // topology in production, but exactly how tests exercise this
+        // path), that exchange must still never be treated as proof a
+        // real external client connected. A diagnostic self-check can
+        // never count as its own evidence.
+        const client = authStore.getClient(clientId);
+        if (client?.clientName === OAUTH_SELF_TEST_CLIENT_NAME) return;
+        recordConnectorConfirmation(workspace.id, `${publicBaseUrl}/mcp`);
       },
     })
   );
@@ -183,6 +239,29 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     res.json({ code: session.code, expiresAt: session.expiresAt });
   });
 
+  // Atomic check-and-create, used ONLY by doctor's OAuth self-test
+  // (auth/oauth-self-test.ts). The self-test previously checked
+  // /admin/info's pairingActive once, then made several more round trips
+  // (DCR, GET /oauth/authorize) before finally calling the unconditional
+  // /admin/pairing above -- a real `c2c pair` landing in that gap was
+  // silently destroyed by the self-test's own later create() call, since
+  // PairingManager.create() always clears any existing session. This route
+  // performs the check and the create in one synchronous step (no `await`
+  // between them), so nothing else this process handles can land in
+  // between -- it either creates a session because none was active, or
+  // reports one is already active and creates nothing (independent review,
+  // 2026-09-04). Never used by `c2c pair` itself, which must keep being
+  // able to unconditionally invalidate a stale prior session on purpose.
+  app.post("/admin/pairing/if-idle", adminGuard, (_req, res) => {
+    const session = pairing.createIfNoneActive();
+    if (!session) {
+      res.json({ created: false });
+      return;
+    }
+    logger.info("Created pairing session (if-idle)");
+    res.json({ created: true, code: session.code, expiresAt: session.expiresAt });
+  });
+
   // ---- Self-test token (doctor's real bearerAuth + /mcp round trip, P0-3) ----
   // Loopback + admin token only, same as every other /admin/* route -- never
   // reachable through the tunnel. Least privilege (workspace.read only) and
@@ -197,6 +276,20 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     const token = typeof req.body?.token === "string" ? req.body.token : "";
     const revoked = token !== "" && authStore.revokeToken(token);
     res.json({ revoked });
+  });
+
+  // ---- OAuth client cleanup (doctor's real DCR->authorize->token round
+  // trip self-test, connector reliability hardening) -- loopback + admin
+  // token only. Used ONLY to remove the throwaway DCR client doctor's own
+  // self-test registers on every run, so the store doesn't accumulate one
+  // "c2c-doctor-self-test" client per doctor invocation forever. Never
+  // used, and never should be used, on a real ChatGPT/Codex client --
+  // "delete and recreate the connector" must never be the fix for a real
+  // connector problem (independent review, 2026-09-03).
+  app.post("/admin/oauth-client/unregister", adminGuard, express.json(), (req: Request, res: Response) => {
+    const clientId = typeof req.body?.clientId === "string" ? req.body.clientId : "";
+    const removed = clientId !== "" && authStore.unregisterClient(clientId);
+    res.json({ removed });
   });
 
   app.get("/admin/info", adminGuard, (_req, res) => {
@@ -307,6 +400,13 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     await activeTunnel.stop().catch(() => undefined);
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (opts.persistRuntime !== false) clearRuntimeState(workspace.id);
+    // Release ownership last, after the port is actually closed -- a
+    // successor's ensureBridge() spawn should never see "lock free" while
+    // this process might still be mid-shutdown and technically reachable.
+    // Full identity (pid + generation + createdAt), not pid alone -- see
+    // releaseWorkspaceLock's own doc comment (independent review,
+    // 2026-09-04, round 3).
+    releaseWorkspaceLock(lockInfo);
     logger.info("Bridge stopped");
   };
 

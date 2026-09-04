@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { findDuplicateCheckoutWarning, recordWorkspaceGitIdentity, type DuplicateCheckoutWarning } from "../workspace/identity.js";
+import { runOAuthSelfTest } from "../auth/oauth-self-test.js";
 import { startBridge } from "../bridge/server.js";
-import { findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
+import { findBridgeObservation, findLiveBridge, observePid, type RuntimeState } from "../bridge/runtime.js";
+import { readWorkspaceLock } from "../bridge/lock.js";
 import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
 import { Workspace } from "../workspace/manager.js";
 import { AuthStore } from "../auth/store.js";
@@ -259,8 +261,8 @@ export interface AdminInfo {
 async function ensureBridgeAndTunnel(
   workspaceRoot: string,
   opts: { tunnel: boolean }
-): Promise<{ runtime: RuntimeState; info: AdminInfo; mcpUrl: string | null }> {
-  const { runtime } = await ensureBridge(workspaceRoot);
+): Promise<{ runtime: RuntimeState; info: AdminInfo; mcpUrl: string | null; spawned: boolean }> {
+  const { runtime, spawned } = await ensureBridge(workspaceRoot);
   let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
   let mcpUrl: string | null = info.publicUrl ? `${info.publicUrl}/mcp` : null;
   if (opts.tunnel && !info.publicUrl) {
@@ -275,7 +277,7 @@ async function ensureBridgeAndTunnel(
     info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
     mcpUrl = `${result.url}/mcp`;
   }
-  return { runtime, info, mcpUrl };
+  return { runtime, info, mcpUrl, spawned };
 }
 
 program
@@ -430,10 +432,33 @@ program
   .option("--tunnel", "re-establish the secure public connection", false)
   .action(async (opts: { workspace?: string; tunnel: boolean }) => {
     const root = resolveWorkspace(opts.workspace);
-    await stopBridge(root);
-    await new Promise((resolve) => setTimeout(resolve, 500));
     try {
-      const { info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
+      const workspace = new Workspace(root);
+      const wasRunning = Boolean(await findLiveBridge(workspace.id));
+      if (wasRunning) {
+        // stopBridge() only returns true once the OLD process is confirmed
+        // gone (see daemon.ts) -- never proceed to ensureBridgeAndTunnel
+        // on a guess. A stale earlier version of this command trusted a
+        // fixed sleep instead and could report "restarted" while silently
+        // reusing the same still-alive process (independent review,
+        // 2026-09-03 -- connector reliability hardening PRIORITY F).
+        const stopped = await stopBridge(root);
+        if (!stopped) {
+          cross("Bridge 未能确认已停止，已取消重启（旧进程可能仍在运行，重试可解决）。");
+          process.exitCode = 1;
+          return;
+        }
+      }
+      const { info, mcpUrl, spawned } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
+      if (wasRunning && !spawned) {
+        // Should be unreachable now that stopBridge() only returns true
+        // after confirming the old process is gone -- kept as a hard
+        // guard so this path can never again silently report success
+        // without a genuinely new process.
+        cross("重启失败：未生成新的 Bridge 进程，请重试。");
+        process.exitCode = 1;
+        return;
+      }
       check(`Bridge 已重启（${info.workspaceName}）`);
       if (mcpUrl) check(`安全连接已建立`);
     } catch (error) {
@@ -509,7 +534,11 @@ program
     // deliberately no other value it could ever be set to, so a report entry
     // carrying it can never be mistaken for a remote (ChatGPT-side) result at
     // the type level, not just by convention. See report.mcpAuthenticated.
-    const report: Record<string, { ok: boolean; detail?: string; scope?: "local" }> = {};
+    // `skipped` (report.oauthRoundTrip only): true means the check
+    // deliberately did not run at all (a real pairing session was active)
+    // -- never a failure, but distinct from "ran and passed" for anything
+    // parsing this precisely.
+    const report: Record<string, { ok: boolean; detail?: string; scope?: "local"; skipped?: boolean }> = {};
     const results: string[] = [];
 
     // Node
@@ -616,6 +645,27 @@ program
         versionInfo = { runtimeVersion: runtime.version, currentVersion: VERSION, versionDrift, schemaDrift };
         const driftNote = versionDrift ? `，运行版本 v${runtime.version}（当前 v${VERSION}，重启可更新）` : "";
         report.bridge = { ok: true, detail: `端口 ${runtime.port}${driftNote}` };
+
+        // Ownership conflict check (connector reliability hardening,
+        // independent review 2026-09-03): a real, live incident showed
+        // `doctor` reporting green while `c2c pair`/`c2c status` and the
+        // Named Tunnel each resolved a DIFFERENT process for the same
+        // workspace -- the runtime-state pointer alone was never proof of
+        // which one actually held ownership. If a lock file exists and its
+        // recorded pid is confirmed ALIVE but disagrees with what this
+        // exact check just resolved as `runtime`, that is a live, active
+        // duplicate -- never silently green. A missing lock (a bridge still
+        // running pre-lock code) or a lock whose recorded pid is confirmed
+        // dead (stale, self-heals on the next spawn) are not conflicts.
+        const lock = readWorkspaceLock(workspace.id);
+        if (lock && (lock.pid !== runtime.pid || lock.generation !== runtime.generation) && observePid(lock.pid) === "present") {
+          report.ownership = {
+            ok: false,
+            detail: `检测到同一 workspace 存在多个活跃 Bridge 进程（pid ${runtime.pid} 与 pid ${lock.pid} 均存活）；不要手动杀掉进程，请重启 Bridge 以收敛`,
+          };
+        } else {
+          report.ownership = { ok: true };
+        }
       } else {
         report.bridge = report.bridge ?? { ok: false, detail: "未运行" };
       }
@@ -688,6 +738,22 @@ program
             () => undefined
           );
         }
+      }
+
+      // PRIORITY D (connector reliability hardening, independent review
+      // 2026-09-03): mcpAuthenticated above only proves bearerAuth + /mcp
+      // honor an internally-minted token -- it never exercises DCR,
+      // /oauth/authorize, pairing, or /oauth/token at all, so a green
+      // doctor was previously compatible with the entire real OAuth
+      // contract ChatGPT depends on being completely broken. This runs
+      // that full round trip for real, through the same public routes
+      // ChatGPT's own client uses. Skips (never fails) if a real pairing
+      // session is currently active, so it can never disrupt one.
+      try {
+        const selfTest = await runOAuthSelfTest(runtime);
+        report.oauthRoundTrip = { ok: selfTest.ok, detail: selfTest.detail, skipped: selfTest.skipped };
+      } catch (error) {
+        report.oauthRoundTrip = { ok: false, detail: (error as Error).message };
       }
     }
 
@@ -944,7 +1010,9 @@ program
       oauth: "OAuth",
       authMiddleware: "Auth Middleware（同 OAuth，命名更准确，新增）",
       mcpAuthenticated: "MCP 授权往返（本地）",
+      oauthRoundTrip: "OAuth 完整往返（DCR→authorize→pairing→token→MCP）",
       tunnel: "Tunnel",
+      ownership: "单实例所有权（同一 workspace 不应存在多个活跃 Bridge）",
     };
     let allOk = true;
     for (const [key, value] of Object.entries(report)) {
@@ -1818,12 +1886,14 @@ export async function applyTunnelChoiceOrUpgrade(opts: {
   const zoneCandidate = (): string | null => parseZoneInput(opts.zone ?? "") ?? readDefaultZone();
   const restartBridgeIfLive = async (): Promise<void> => {
     if (await findLiveBridge(opts.workspaceId)) {
-      await stopBridge(opts.workspaceRoot);
-      // stopBridge fires /admin/shutdown without waiting for the process
-      // to actually exit — give it a moment so the next ensureBridge
-      // spawns fresh and picks up the new tunnel state instead of racing
-      // the still-dying old bridge.
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      // stopBridge() now blocks until the old process is confirmed gone
+      // (see daemon.ts) -- no more fixed sleep-and-hope. If it can't
+      // confirm the stop, say so instead of silently leaving the bridge
+      // on its old tunnel state (independent review, 2026-09-03).
+      const stopped = await stopBridge(opts.workspaceRoot);
+      if (!stopped) {
+        messages.push("警告：未能确认旧 Bridge 已停止，新的隧道设置可能要等下次重启才会生效。");
+      }
     }
   };
 
@@ -1880,13 +1950,26 @@ export async function applyTunnelChoiceOrUpgrade(opts: {
 }
 
 async function defaultBridgeRestart(root: string): Promise<{ runtime: RuntimeState; info: AdminInfo }> {
-  await stopBridge(root);
-  // stopBridge fires /admin/shutdown without waiting for the process to
-  // actually exit — give it a moment so the next ensureBridge spawns
-  // fresh and picks up the tunnel state instead of racing the still-dying
-  // old bridge.
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  const runtime = (await ensureBridge(root)).runtime;
+  const wasRunning = Boolean(await findLiveBridge(new Workspace(root).id));
+  if (wasRunning) {
+    // stopBridge() now blocks until the old process is confirmed gone
+    // (see daemon.ts) -- a fixed sleep here used to race a still-dying
+    // old bridge, letting ensureBridge() below silently reuse it instead
+    // of spawning fresh with the new tunnel state (independent review,
+    // 2026-09-03 -- connector reliability hardening PRIORITY F).
+    const stopped = await stopBridge(root);
+    if (!stopped) {
+      throw new Error("Bridge did not confirm shutdown in time; refusing to restart to avoid reusing the old instance.");
+    }
+  }
+  const { runtime, spawned } = await ensureBridge(root);
+  if (wasRunning && !spawned) {
+    // Unreachable in practice now that stopBridge() only returns true
+    // once the old process is confirmed gone -- kept as a hard guard so
+    // this repair path can never again silently report success while
+    // reusing the old process.
+    throw new Error("Bridge restart did not produce a new process instance.");
+  }
   // ensureBridge only brings the local HTTP server up — the actual tunnel
   // (Named or Quick) is never started until this explicit call (see
   // ensureBridgeAndTunnel above, which does the same thing for the same

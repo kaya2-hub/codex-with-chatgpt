@@ -41,6 +41,7 @@ import {
   type CodingAgent,
 } from "../config/sandbox-allow.js";
 import { mergeUiPrefs, readUiPrefs, SETUP_MODES, type SetupMode } from "../config/ui-prefs.js";
+import { defaultSkillSyncTargets, runSkillSync } from "../config/skill-sync.js";
 import {
   CHATGPT_CREATE_CONNECTOR_URL,
   CHATGPT_DEVELOPER_MODE_URL,
@@ -1253,6 +1254,32 @@ program
     fs.mkdirSync(getStateDir(), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({ date: today, updateAvailable, remoteCommit }), { mode: 0o600 });
     emit({ checked: true, updateAvailable, localCommit: local.stdout, remoteCommit });
+  });
+
+// ---------------------------------------------------------------- skill-sync (repo Skill files vs. the installed
+// copies Codex/Claude Code actually read — independent of update-check's git remote comparison; a local edit to
+// skill/SKILL.md or skill-claude-code/SKILL.md is drift the moment it's saved, whether or not this checkout is
+// ahead of any remote)
+
+program
+  .command("skill-sync")
+  .description(
+    "Detect (and with --fix, repair) drift between this checkout's Skill files and the installed copies Codex/Claude Code actually read"
+  )
+  .option("--fix", "copy the repo's current Skill content over any stale installed copy", false)
+  .option("--json", "machine-readable output", false)
+  .action((opts: { fix: boolean; json: boolean }) => {
+    const results = runSkillSync(defaultSkillSyncTargets(repoRoot), { fix: opts.fix, checkoutPath: repoRoot });
+    if (opts.json) {
+      say(JSON.stringify({ ok: true, results }));
+      return;
+    }
+    for (const r of results) {
+      if (!r.repoFound) say(`${r.agent}: repo 中未找到 Skill 源文件（${r.repoPath}）`);
+      else if (r.fixed) say(`${r.agent}: 已将最新 Skill 同步到 ${r.installedPath}`);
+      else if (r.stale) say(`${r.agent}: 已安装的 Skill 落后于 repo（${r.installedPath}），加 --fix 可自动同步`);
+      else say(`${r.agent}: 已安装的 Skill 与 repo 一致`);
+    }
   });
 
 // ---------------------------------------------------------------- session (ChatGPT conversation / Project memory)

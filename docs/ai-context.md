@@ -132,10 +132,22 @@ honest file is safer than a confidently rewritten wrong one.
 
 ## Updating it at the end of a session
 
-When a C2C task reaches DONE (or the user ends the session), update
-`AI_CONTEXT.md` if the session actually changed the project's current
-state — current phase, newly confirmed decisions, newly obsolete items.
-Update only what you have evidence for:
+When a C2C task reaches DONE (or the user ends the session), first run a
+cheap mechanical check — `git log -1 --oneline` and `git status --short` —
+and compare them against whatever commit/dirty-state `AI_CONTEXT.md`'s
+"現在地点" section currently claims. This check is not optional and not a
+judgment call: if the two disagree, that section is now provably wrong about
+the repository's actual state and must be corrected (at minimum the commit
+hash / dirty-clean line), even when nothing else in the file needs to
+change. This exists because the narrower judgment call below — "did this
+task change project state" — has been observed to get silently skipped in
+practice, leaving a stale commit/dirty claim behind even when the file's
+other sections were still accurate.
+
+Beyond that mechanical check, update the rest of `AI_CONTEXT.md` if the
+session actually changed the project's current state — current phase,
+newly confirmed decisions, newly obsolete items. Update only what you have
+evidence for:
 
 - the actual implementation / diff
 - test results

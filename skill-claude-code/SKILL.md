@@ -211,8 +211,19 @@ rule 5:
 
 At the START of every workflow below (before anything else), run:
 
-1. `c2c update-check --json`
-2. (No `sandbox-allow` step here — see golden rule 7.)
+1. `c2c skill-sync --fix --json`. This is unrelated to the git-remote check
+   below — it detects drift between this checkout's own `skill-claude-code/
+   SKILL.md` / `skill/SKILL.md` and the copies actually installed at
+   `~/.claude/skills/codex-with-chatgpt/SKILL.md` / `~/.codex/skills/
+   codex-with-chatgpt/SKILL.md` (e.g. after a local edit to this checkout
+   that never got copied out) and repairs it in place. Purely local file
+   comparison — no network, safe to run every time, never mention it unless
+   `results[].fixed` is `true` for THIS agent, in which case tell the user
+   once: "本地 Skill 版本已过期，我已同步到最新（下次对话生效）。" (the fix
+   applies to the file on disk; this already-running session keeps using
+   whatever it loaded at start).
+2. `c2c update-check --json`
+3. (No `sandbox-allow` step here — see golden rule 7.)
 
 - `{ "updateAvailable": false }` → continue silently. Never mention the check.
 - `{ "updateAvailable": true }` → first inspect the checkout with
@@ -235,10 +246,11 @@ Inside the checkout directory (see Locations):
    `docs/troubleshooting.md` § shared checkout); if that safety gate fails,
    keep the installed build and report the update as deferred.
 2. `corepack pnpm install && corepack pnpm build` (or `npm install && npm run build`).
-3. Re-install this adapter's Skill: copy `skill-claude-code/SKILL.md` to
-   `~/.claude/skills/codex-with-chatgpt/SKILL.md` (personal, cross-project —
-   see `%USERPROFILE%\.claude\skills\` on Windows), then fix the "checkout
-   lives at:" line in the copy to the actual checkout path.
+3. `c2c skill-sync --fix --json` (re-installs both adapters' Skills from
+   this checkout, filling in the "checkout lives at:" line automatically —
+   same mechanism as the Daily update check above, run here explicitly so
+   the freshly-pulled content takes effect immediately rather than waiting
+   for the next workflow start).
 4. `c2c restart -w <workspace>` so the bridge runs the new code, then
    `c2c update-check --force --json` to refresh the cache (should now report up to date).
 5. Tell the user "✓ 已更新到最新版本" — then resume whatever task triggered this.
@@ -539,14 +551,17 @@ Please independently inspect the workspace and current git diff through MCP.
     window where a crash between receiving DONE and running this command
     lost the transition from Kokuban entirely, leaving the blackboard
     stuck on the previous state):
-    `c2c session set -w <ws> --state DONE`
-    Only then summarize the result to the user in plain language, and
-    update `AI_CONTEXT.md` if this task actually changed the project's
-    current state (phase, confirmed decisions, newly obsolete items) —
-    grounded in the real diff, test results, and what was just confirmed
-    with ChatGPT, never in the mere fact that a task finished. See
-    `docs/ai-context.md` § Updating it. If nothing about the project's
-    current state changed, leave the file alone.
+    `c2c session set -w <ws> --state DONE --clear-checkpoint`
+    Only then summarize the result to the user in plain language. Before
+    deciding whether `AI_CONTEXT.md` needs a content update, first run the
+    mandatory mechanical check from `docs/ai-context.md` § Updating it
+    (`git log -1 --oneline` / `git status --short` vs. what "現在地点"
+    currently claims) and fix that line if it disagrees — this is not
+    optional, even when no other section changes. Beyond that, update the
+    rest of the file if this task actually changed the project's current
+    state (phase, confirmed decisions, newly obsolete items) — grounded in
+    the real diff, test results, and what was just confirmed with ChatGPT,
+    never in the mere fact that a task finished.
 11. On BLOCKED: canonical state emission comes FIRST too, before reading/
     acting on the reason (same rationale as DONE above; `--iteration` is
     the number ChatGPT's BLOCKED message carried):

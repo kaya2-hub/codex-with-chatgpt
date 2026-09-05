@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { ensureDir, getStateDir } from "../config/paths.js";
 import {
   clearRuntimeState,
@@ -34,10 +35,20 @@ function cliEntry(): { cmd: string; args: string[] } {
   if (fs.existsSync(distEntry)) {
     return { cmd: process.execPath, args: [distEntry] };
   }
-  // dev fallback: run TypeScript sources through the tsx ESM loader
+  // dev fallback: run TypeScript sources through the tsx ESM loader.
+  // Resolve "tsx/esm" against this package's own node_modules, not the
+  // spawned child's cwd (the daemon inherits the *workspace* directory as
+  // its cwd -- see ensureBridge's spawn() call, which has no `cwd` override
+  // by design so Workspace path-containment keeps working). A bare
+  // "tsx/esm" specifier passed to --import resolves relative to that cwd,
+  // which has no tsx of its own, and crashes with ERR_MODULE_NOT_FOUND
+  // before the bridge ever starts (see the identical fix and full
+  // explanation in bin/c2c.js).
   const projectRoot = path.resolve(__dirname, "..", "..");
   const tsEntry = path.join(projectRoot, "src", "cli", "run.ts");
-  return { cmd: process.execPath, args: ["--import", "tsx/esm", tsEntry] };
+  const require = createRequire(pathToFileURL(path.join(projectRoot, "package.json")).href);
+  const tsxEsmLoader = pathToFileURL(require.resolve("tsx/esm")).href;
+  return { cmd: process.execPath, args: ["--import", tsxEsmLoader, tsEntry] };
 }
 
 export interface EnsureBridgeResult {

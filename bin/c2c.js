@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -77,9 +78,18 @@ if (useDist) {
   // is enough — it unconditionally calls runCli() itself, top-level.
   await import(pathToFileURL(dist).href);
 } else {
-  // dev fallback: run TypeScript sources through the tsx ESM loader
+  // dev fallback: run TypeScript sources through the tsx ESM loader.
+  // Resolve "tsx/esm" against this package's own node_modules (not the
+  // caller's cwd) and pass it to --import as an absolute file:// URL --
+  // bare specifiers passed to --import are otherwise resolved relative to
+  // process.cwd(), which is the *invoking workspace* directory (e.g. a
+  // project that has c2c installed but no tsx of its own), not this tool's
+  // checkout. That mismatch made every `c2c` command fail with
+  // ERR_MODULE_NOT_FOUND when run from any workspace other than this repo.
   const entry = path.join(root, "src", "cli", "run.ts");
-  const result = spawnSync(process.execPath, ["--import", "tsx/esm", entry, ...process.argv.slice(2)], {
+  const require = createRequire(pathToFileURL(path.join(root, "package.json")).href);
+  const tsxEsmLoader = pathToFileURL(require.resolve("tsx/esm")).href;
+  const result = spawnSync(process.execPath, ["--import", tsxEsmLoader, entry, ...process.argv.slice(2)], {
     stdio: "inherit",
   });
   process.exit(result.status ?? 1);

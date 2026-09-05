@@ -793,10 +793,8 @@ If status is restricted, ignore it and review from git_diff.
 9. Loop. Respect maxIterations (`.c2c.json`, default 12). At the limit, pause and ask
    the user: "已完成 12 轮协作，仍有未解决问题，是否继续？"
 10. On DONE: canonical state emission comes FIRST, before anything else
-    (independent review, 2026-09-03: summarizing/AI_CONTEXT first left a
-    window where a crash between receiving DONE and running this command
-    lost the transition from Kokuban entirely, leaving the blackboard
-    stuck on the previous state) —
+    (a crash between receiving DONE and running this command should never
+    leave local session state behind what ChatGPT actually confirmed) —
     `c2c session set -w <ws> --state DONE --clear-checkpoint`
     Only then summarize the result to the user in plain language. Before
     deciding whether `AI_CONTEXT.md` needs a content update, first run the

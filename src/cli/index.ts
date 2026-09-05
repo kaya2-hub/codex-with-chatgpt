@@ -71,16 +71,6 @@ import {
 } from "../session/state.js";
 import { appendExecutionRecord } from "../execution/records.js";
 import { saveExecutionOutput } from "../execution/output.js";
-import {
-  DEFAULT_TOKEN_ENV_VAR,
-  deriveKokubanExtras,
-  prepareKokubanTransition,
-  reconcileKokubanOutboxLocally,
-  sendKokubanEventsInOrder,
-} from "../session/kokuban.js";
-import { resolveEffectiveKokubanConfig } from "../session/kokuban-config.js";
-import { deleteKokubanSecret, resolveKokubanToken, saveKokubanSecret } from "../session/kokuban-secret.js";
-import { commitOutboxEvent, runUnderKokubanLock, type KokubanCanonicalEvent } from "../session/kokuban-outbox.js";
 
 const program = new Command();
 
@@ -92,69 +82,6 @@ const cross = (msg: string): void => say(`✗ ${msg}`);
 
 function resolveWorkspace(option?: string): string {
   return path.resolve(option ?? process.cwd());
-}
-
-/**
- * Reads one secret value from stdin without it ever appearing in argv/shell
- * history (`c2c kokuban-token set`'s only input path) -- see the CLI
- * command's own doc comment. Two modes:
- *  - Piped (not a TTY, e.g. `echo "$TOKEN" | c2c kokuban-token set`): reads
- *    everything written to stdin and trims it.
- *  - Interactive (a real TTY): prompts, reads raw keystrokes, echoes `*` per
- *    character instead of the character itself (Backspace/Delete removes
- *    one), and resolves on Enter. Ctrl-C rejects with a cancellation error
- *    rather than silently returning a partial value.
- * Either way, the returned string never appears anywhere else -- not
- * echoed back, not logged.
- */
-function readSecretFromStdin(promptText: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    if (!process.stdin.isTTY) {
-      let data = "";
-      process.stdin.setEncoding("utf8");
-      process.stdin.on("data", (chunk) => (data += chunk));
-      process.stdin.on("end", () => resolve(data.trim()));
-      process.stdin.on("error", reject);
-      return;
-    }
-    process.stdout.write(promptText);
-    const stdin = process.stdin;
-    stdin.resume();
-    stdin.setRawMode(true);
-    stdin.setEncoding("utf8");
-    let value = "";
-    const onData = (char: string) => {
-      switch (char) {
-        case "\n":
-        case "\r":
-        case "\u0004": // Ctrl-D
-          stdin.setRawMode(false);
-          stdin.pause();
-          stdin.removeListener("data", onData);
-          process.stdout.write("\n");
-          resolve(value);
-          break;
-        case "\u0003": // Ctrl-C
-          stdin.setRawMode(false);
-          stdin.pause();
-          stdin.removeListener("data", onData);
-          process.stdout.write("\n");
-          reject(new Error("cancelled"));
-          break;
-        case "\u007f": // Backspace
-        case "\b":
-          if (value.length > 0) {
-            value = value.slice(0, -1);
-            process.stdout.write("\b \b");
-          }
-          break;
-        default:
-          value += char;
-          process.stdout.write("*");
-      }
-    };
-    stdin.on("data", onData);
-  });
 }
 
 /** Local harness output only. Never pasted into ChatGPT. */
@@ -1355,14 +1282,6 @@ session
     }) => {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
 
-      // Default-ON as of ITERATION 4: resolveEffectiveKokubanConfig() is
-      // the SINGLE place that decides participation + projectKey (no
-      // block at all -> ON with a derived projectKey; `enabled:false` ->
-      // null, the only way to opt out; an explicit projectKey always
-      // wins). null here means genuinely opted out -- the outbox/lock/
-      // network are never touched for this workspace, same as before.
-      const kokubanConfig = resolveEffectiveKokubanConfig(workspace);
-
       const modeRaw = opts.mode?.trim().toLowerCase();
       if (modeRaw && modeRaw !== "long-chat" && modeRaw !== "project") {
         throw new Error("mode must be long-chat or project");
@@ -1403,104 +1322,13 @@ session
           : undefined,
       });
 
-      let saved: ReturnType<typeof mergeSession>;
-      let reconciledToSend: KokubanCanonicalEvent[] = [];
-      let preparedKokubanEvent: KokubanCanonicalEvent | null = null;
-
-      if (kokubanConfig) {
-        // Single contiguous local critical section (independent review,
-        // third round): reconcile any leftover outbox entries from a
-        // PREVIOUS run, read/merge the session, prepare+commit this run's
-        // own new transition, and writeSession() -- all while holding this
-        // workspace's Kokuban lock, all with zero network calls inside it.
-        // Earlier revisions split this into "drain (own lock), then later
-        // re-lock to mutate", which left a gap between the two for another
-        // process to interleave; runUnderKokubanLock() closes that gap by
-        // construction. On lock contention this throws
-        // KokubanLockUnavailableError -- fail CLOSED, never proceed
-        // unlocked -- since contention here means another local process is
-        // concurrently mutating this same workspace's session/outbox right
-        // now, not a Kokuban/network problem. See kokuban-outbox.ts.
-        const result = await runUnderKokubanLock(workspace.id, () => {
-          const { toSend } = reconcileKokubanOutboxLocally(workspace.id);
-          const mergedSaved = mergeSession(readSession(workspace.id), buildSessionPatch());
-          let prepared: KokubanCanonicalEvent | null = null;
-
-          if (opts.state) {
-            const extras = deriveKokubanExtras(mergedSaved.checkpoint);
-            try {
-              prepared = prepareKokubanTransition({
-                workspaceId: workspace.id,
-                config: kokubanConfig,
-                state: opts.state,
-                taskId: mergedSaved.taskId,
-                iteration: mergedSaved.iteration,
-                holderAfter: extras.holderAfter,
-                stopReason: extras.stopReason,
-                summary: extras.summary,
-              });
-            } catch (error) {
-              // A LOCAL write-ahead failure (not a Kokuban/network failure
-              // -- those stay fail-soft, see below) must stop here, before
-              // writeSession(): proceeding would commit C2C state with no
-              // valid local durability record of the corresponding Kokuban
-              // event at all.
-              throw new Error(
-                `Kokuban local write-ahead log could not be written (${(error as Error).message}). Session state was NOT saved. Check local disk/permissions for the state directory, or set "kokuban": { "enabled": false } in .c2c.json to opt this workspace out of Kokuban (participation is default-ON as of ITERATION 4 -- removing the "kokuban" block no longer disables it).`
-              );
-            }
-          }
-
-          writeSession(workspace.id, mergedSaved);
-
-          // The transition is now durably committed. Flip the SAME outbox
-          // entry to "committed" (an exclusively-created marker, never a
-          // rewrite of the immutable payload -- see kokuban-outbox.ts)
-          // while STILL holding the lock -- network sends happen only
-          // after the lock releases, below.
-          if (prepared) {
-            const committed = commitOutboxEvent(workspace.id, prepared.idempotencyKey);
-            if (!committed) {
-              say("⚠ Kokuban本地确认标记写入失败(session已正常保存；下次 session set/clear 时会自动重新确认)。");
-            }
-          }
-
-          return { saved: mergedSaved, toSend, prepared };
-        });
-        saved = result.saved;
-        reconciledToSend = result.toSend;
-        preparedKokubanEvent = result.prepared;
-      } else {
-        saved = mergeSession(readSession(workspace.id), buildSessionPatch());
-        writeSession(workspace.id, saved);
-      }
+      const saved = mergeSession(readSession(workspace.id), buildSessionPatch());
+      writeSession(workspace.id, saved);
 
       if (saved.projectUrl && saved.conversationMode === "project") {
         check("已记录 ChatGPT 合集，后续从合集页新开或复用对话");
       } else {
         check("已记录 ChatGPT 会话，后续任务将复用");
-      }
-
-      // Delivery itself stays fully fail-soft: a send failure leaves the
-      // entry "committed" for the next mutation's reconciliation to retry
-      // with the exact same stored payload; it never blocks or fails this
-      // command. sendKokubanEventsInOrder() delivers strictly in outbox
-      // order and stops at the first unconfirmed/failed send (independent
-      // review, fourth round) -- reconciled leftovers from a previous run
-      // are always older than this run's own new transition, so appending
-      // it last and letting delivery stop early on any earlier failure is
-      // what preserves remote event order.
-      const orderedToSend = preparedKokubanEvent ? [...reconciledToSend, preparedKokubanEvent] : reconciledToSend;
-      if (orderedToSend.length > 0) {
-        const { sentCount, lastAttempted } = await sendKokubanEventsInOrder(workspace.id, orderedToSend);
-        if (preparedKokubanEvent) {
-          const newEventDelivered = sentCount === orderedToSend.length;
-          if (newEventDelivered && lastAttempted) {
-            check(`Kokuban: ${lastAttempted.detail}`);
-          } else if (lastAttempted) {
-            say(`⚠ Kokuban送信は保留されました(次回 session set/clear 時に自動再試行、session自体は正常に保存済み): ${lastAttempted.detail}`);
-          }
-        }
       }
     }
   );
@@ -1511,124 +1339,11 @@ session
   .option("-w, --workspace <path>")
   .action(async (opts: { workspace?: string }) => {
     const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    // clearChatPointer() also calls writeSession() and can wipe
-    // taskId/iteration/lastState -- the exact fields reconciliation compares
-    // a leftover "prepared" entry against. Independent review, third round:
-    // reconciliation and the clear itself must share the SAME critical
-    // section as session set's own mutation (not merely "drain first, then
-    // clear separately" -- that still leaves a gap for another process to
-    // interleave between them). Network sends happen only after release.
-    // Same single effective-config resolver as `session set` -- see its
-    // comment above.
-    const kokubanConfig = resolveEffectiveKokubanConfig(workspace);
-    let reconciledToSend: KokubanCanonicalEvent[] = [];
-    let result: ReturnType<typeof clearChatPointer>;
-
-    if (kokubanConfig) {
-      const outcome = await runUnderKokubanLock(workspace.id, () => {
-        const { toSend } = reconcileKokubanOutboxLocally(workspace.id);
-        return { toSend, cleared: clearChatPointer(workspace.id) };
-      });
-      reconciledToSend = outcome.toSend;
-      result = outcome.cleared;
-    } else {
-      result = clearChatPointer(workspace.id);
-    }
+    const result = clearChatPointer(workspace.id);
 
     if (!result.cleared) say("尚未记录 ChatGPT 会话。");
     else if (result.keptProject) check("已清除当前对话，合集绑定仍保留");
     else check("已清除会话记录，下次任务将新建 ChatGPT 会话");
-
-    // Delivered strictly in outbox order, stopping at the first
-    // unconfirmed/failed send (independent review, fourth round) -- see
-    // sendKokubanEventsInOrder's doc comment in kokuban.ts.
-    await sendKokubanEventsInOrder(workspace.id, reconciledToSend);
-  });
-
-const kokubanTokenCmd = program
-  .command("kokuban-token")
-  .description(
-    "Manage a persisted Kokuban write token for a workspace, so KOKUBAN_WRITE_TOKEN doesn't need to be set in every new terminal / after every reboot"
-  );
-
-kokubanTokenCmd
-  .command("status", { isDefault: true })
-  .description("Show whether a Kokuban token is currently available for this workspace, and where it comes from")
-  .option("-w, --workspace <path>")
-  .option("--json", "machine-readable output", false)
-  .action((opts: { workspace?: string; json: boolean }) => {
-    const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    const kokubanConfig = resolveEffectiveKokubanConfig(workspace);
-    const tokenEnvVar = kokubanConfig?.tokenEnvVar?.trim() || DEFAULT_TOKEN_ENV_VAR;
-    const resolved = resolveKokubanToken(workspace.id, tokenEnvVar);
-    if (opts.json) {
-      say(JSON.stringify({ ok: true, kokubanEnabled: kokubanConfig !== null, tokenEnvVar, source: resolved?.source ?? "none" }));
-      return;
-    }
-    if (!kokubanConfig) {
-      say('此 workspace 已通过 .c2c.json 的 "kokuban": { "enabled": false } 显式关闭 Kokuban。');
-      return;
-    }
-    if (resolved?.source === "env") check(`Kokuban token 可用（来自环境变量 ${tokenEnvVar}）`);
-    else if (resolved?.source === "persisted") check("Kokuban token 可用（来自本机持久化存储）");
-    else cross(`Kokuban token 不可用。运行 "c2c kokuban-token set" 注册一个，或设置环境变量 ${tokenEnvVar}。`);
-  });
-
-kokubanTokenCmd
-  .command("set")
-  .description(
-    'Register this workspace\'s Kokuban write token, read from stdin (never from a --flag, to keep it out of shell history). Interactive: prompts and masks input. Piped: `echo "$TOKEN" | c2c kokuban-token set`.'
-  )
-  .option("-w, --workspace <path>")
-  .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; json: boolean }) => {
-    const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    let token: string;
-    try {
-      token = await readSecretFromStdin("Kokuban write token: ");
-    } catch (error) {
-      handleCliError(error, opts.json);
-      return;
-    }
-    if (!token.trim()) {
-      handleCliError(new Error("no token provided"), opts.json);
-      return;
-    }
-    const result = saveKokubanSecret(workspace.id, token);
-    if (opts.json) {
-      say(JSON.stringify(result));
-      return;
-    }
-    if (!result.ok) {
-      cross(`Kokuban token 保存失败：${result.error}`);
-      process.exitCode = 1;
-      return;
-    }
-    if (result.encoding === "plaintext") {
-      say("⚠ 当前平台无法使用 Windows DPAPI 加密，token 将以仅 0o600 文件权限保护的明文保存（保护强度弱于 Windows）。");
-    }
-    check("已安全保存 Kokuban token（仅当前用户 / 当前 workspace 可用，绝不写入 .c2c.json）。");
-  });
-
-kokubanTokenCmd
-  .command("revoke")
-  .description("Remove the persisted Kokuban write token for this workspace")
-  .option("-w, --workspace <path>")
-  .option("--json", "machine-readable output", false)
-  .action((opts: { workspace?: string; json: boolean }) => {
-    const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    const result = deleteKokubanSecret(workspace.id);
-    if (opts.json) {
-      say(JSON.stringify(result));
-      return;
-    }
-    if (!result.ok) {
-      cross(`Kokuban token 删除失败：${result.error}`);
-      process.exitCode = 1;
-      return;
-    }
-    if (!result.existed) say("此 workspace 未保存 Kokuban token。");
-    else check("已删除已保存的 Kokuban token。");
   });
 
 const prefsCmd = program

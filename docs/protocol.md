@@ -54,14 +54,13 @@ just to resume.
 
 `c2c session set -w <ws> --task <id> --iteration <n> --state <STATE>` is the
 **single** canonical emitter for all 5 wire states, for both adapters (Codex
-and Claude Code) — it is what Kokuban (Personal Core's Activity Event Log,
-when enabled for this workspace) reads from to record each confirmed state
-transition. Skipping this call for a given transition means that Activity
-Event never gets recorded at all, independent of whatever else the coding
-agent did locally (an omission that actually happened for PLAN and BLOCKED
-before this section existed — see the Skills' own workflow steps, which are
-required to call it out explicitly for every one of the 5 states below, not
-just the 3 that happen to be easy to remember).
+and Claude Code) — it is the single source of truth other tooling can read
+state transitions from. Skipping this call for a given transition means that
+transition is never recorded anywhere, independent of whatever else the
+coding agent did locally (an omission that actually happened for PLAN and
+BLOCKED before this section existed — see the Skills' own workflow steps,
+which are required to call it out explicitly for every one of the 5 states
+below, not just the 3 that happen to be easy to remember).
 
 Exactly when each adapter runs it:
 
@@ -77,13 +76,6 @@ Session-checkpoint flags (`--protocol-state`, `--waiting-for`, `--goal`,
 `--known-issues`, `--next-step`, ...) may be passed on the SAME `session set`
 call that carries `--state` — there is no need for a separate call, and
 Codex's Skill already does this (see `skill/SKILL.md`).
-
-Never build a separate Kokuban producer, a separate command, or call
-Kokuban's API (`reportKokubanTransition()`) directly from a Skill. The
-existing `session set --state` call is the only integration point; adding a
-second path risks double-reporting the same transition (or reporting one
-adapter's transitions through a different, undertested path than the
-other's) for no benefit `session set` doesn't already provide.
 
 ## Message format
 

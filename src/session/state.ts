@@ -18,9 +18,8 @@ export type ProtocolState =
 /**
  * CONDITION/EXTERNAL let a checkpoint express "blocked, waiting on an
  * internal condition" vs "blocked, waiting on something outside our
- * control" as an explicit field -- see src/session/kokuban.ts, which maps
- * this enum onto Kokuban's holderAfter for BLOCKED reports rather than
- * inferring anything from free text.
+ * control" as an explicit field, rather than inferring anything from free
+ * text.
  */
 export type WaitingFor = "none" | "GPT_PLAN" | "GPT_REVIEW" | "USER" | "CONDITION" | "EXTERNAL";
 

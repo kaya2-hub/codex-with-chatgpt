@@ -439,9 +439,8 @@ new chat per task or per Claude Code session.
 - **Update it**: at each of the 5 protocol wire states (INIT / PLAN /
   EXECUTED / DONE / BLOCKED), run
   `c2c session set -w <ws> --task <id> --iteration <n> --state <STATE>` --
-  this is also the canonical emitter Kokuban (Personal Core's Activity Event
-  Log) reads from, so skipping a state here means that Activity Event never
-  gets recorded, not just a missed local bookkeeping update. See the exact
+  skipping a state here means that transition is never recorded anywhere,
+  not just a missed local bookkeeping update. See the exact
   emission point for each state in **Workflow: coding task** below, and
   `docs/protocol.md` § Canonical state emission for the underlying contract
   (identical for Codex and Claude Code).
@@ -547,10 +546,8 @@ Please independently inspect the workspace and current git diff through MCP.
 9. Loop. Respect maxIterations (`.c2c.json`, default 12). At the limit, pause
    and ask the user: "已完成 12 轮协作，仍有未解决问题，是否继续？"
 10. On DONE: canonical state emission comes FIRST, before anything else
-    (independent review, 2026-09-03: summarizing/AI_CONTEXT first left a
-    window where a crash between receiving DONE and running this command
-    lost the transition from Kokuban entirely, leaving the blackboard
-    stuck on the previous state):
+    (a crash between receiving DONE and running this command should never
+    leave local session state behind what ChatGPT actually confirmed):
     `c2c session set -w <ws> --state DONE --clear-checkpoint`
     Only then summarize the result to the user in plain language. Before
     deciding whether `AI_CONTEXT.md` needs a content update, first run the

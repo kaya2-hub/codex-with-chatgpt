@@ -17,6 +17,7 @@ export async function emulatorStore() {
   const [h, p] = process.env.FIRESTORE_EMULATOR_HOST.split(":");
   fs.connectFirestoreEmulator(db, h, Number(p));
   const store = new FirestoreStore(db, fs, { projectId: "demo-ff14rp" });
+  store.raw = { db, fs };
   // テスト間の独立性のため全マスターを空にする(エミュレータのみ)
   const { MASTER_COLLECTIONS } = await import("../core/collections.js");
   for (const c of MASTER_COLLECTIONS) for (const d of await store.list(c)) await fs.deleteDoc(fs.doc(db, c, d.id));

@@ -11,6 +11,7 @@
 import fs from "node:fs";
 import { assertDemoEmulator } from "./safety.js";
 import * as B from "./backup-lib.js";
+import { snapshotFromTypedDocs, summarize } from "./ver-lib.js";
 
 const a = process.argv.slice(2), cmd = a[0];
 const opt = n => { const i = a.indexOf("--" + n); return i >= 0 ? a[i + 1] : undefined; };
@@ -32,6 +33,8 @@ report.documents = backup.docs.size; report.rootCollections = cols.size; report.
 const exp = opt("expect-docs") || process.env.FF14_EXPECT_DOCS, expc = opt("expect-collections") || process.env.FF14_EXPECT_COLLECTIONS;
 report.checks.expectedDocs = exp ? Number(exp) === backup.docs.size : "未指定";
 report.checks.expectedCollections = expc ? Number(expc) === cols.size : "未指定";
+const verSnap = snapshotFromTypedDocs(backup.docs);
+if (Object.keys(verSnap).length) { report.verSummary = summarize(verSnap); if (opt("ver-out") || process.env.FF14_VER_OUT) fs.writeFileSync(opt("ver-out") || process.env.FF14_VER_OUT, JSON.stringify(verSnap)); }
 const rest = new B.EmulatorRest(host, project);
 await rest.clear();
 await rest.put(backup.docs);
@@ -42,5 +45,6 @@ report.sourceUnchanged = JSON.stringify(before) === JSON.stringify(after);
 const pass = report.checksums.bad.length === 0 && report.checksums.missing.length === 0 && backup.duplicates.length === 0 && v.matched === v.expected && report.sourceUnchanged && report.checks.expectedDocs !== false && report.checks.expectedCollections !== false;
 report.verdict = pass ? "PASS" : "FAIL";
 report.note = "PASSは: SHA256一致・重複0・全文書(ID/型/値)が復元後に一致・元ファイル不変・本番接続なし。他店とのデータ混在は別々のdirで別projectへ復元して確認する。";
+const outFile = opt("report-out") || process.env.FF14_REPORT_OUT; if (outFile) fs.writeFileSync(outFile, JSON.stringify(report, null, 2));
 console.log(JSON.stringify(report, null, 2));
 process.exit(pass ? 0 : 1);

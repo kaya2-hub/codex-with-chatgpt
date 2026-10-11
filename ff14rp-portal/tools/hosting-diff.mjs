@@ -2,7 +2,7 @@
 /**
  * 現行Hosting配信の静的ファイルと、保存版ソースの差分確認(副作用なし)。
  * HTTP GETのみ。ページはブラウザで開かず、JSも実行しません(Firestoreに触れません)。
- *   node tools/hosting-diff.mjs --base https://<site>.web.app --local <保存版dir> [--files index.html,app.js,logic.js,styles.css,version.json]
+ *   node tools/hosting-diff.mjs --base https://<site>.web.app --local <保存版dir> [--profile diner|toko | --files index.html,app.js,...]
  * 出力: ファイルごとの SAME / DIFFERENT / REMOTE_MISSING / LOCAL_MISSING と SHA256先頭と長さ。
  * ※ firebase-config.js(公開Web設定)は比較対象に含めますが内容は出力しません。
  */
@@ -14,7 +14,8 @@ const a = process.argv.slice(2);
 const opt = n => { const i = a.indexOf("--" + n); return i >= 0 ? a[i + 1] : undefined; };
 const base = opt("base"), local = opt("local");
 if (!base || !local) { console.error("--base と --local が必要です"); process.exit(2); }
-const files = (opt("files") || "index.html,app.js,logic.js,styles.css,customer-seed.js,version.json,firebase-config.js").split(",");
+const PROFILES = { diner: "index.html,version.json,firebase-config.js", toko: "index.html,app.js,logic.js,styles.css,customer-seed.js,version.json,firebase-config.js" };
+const files = (opt("files") || PROFILES[opt("profile")] || PROFILES.toko).split(",");
 const sha = b => crypto.createHash("sha256").update(b).digest("hex");
 const norm = b => Buffer.from(b.toString("utf8").replace(/\r\n/g, "\n"), "utf8"); // 改行差のみは同一扱い
 const rows = []; let different = 0;

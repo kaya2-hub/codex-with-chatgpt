@@ -13,6 +13,7 @@
     "migrate:demo": "node tools/migrate.mjs plan --demo"
   },
   "devDependencies": {
+    "esbuild": "^0.24.0",
     "firebase": "10.14.1",
     "firebase-tools": "13.35.1",
     "playwright-core": "^1.49.1"

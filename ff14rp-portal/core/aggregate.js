@@ -1,6 +1,6 @@
 // 集計。来店 / Verスタンプ / 注文 / セレモニー到達 は別指標として別フィールドで返す。
 // 店舗の読込が失敗した場合は合計を確定値にせず null を返す(捏造しない)。
-export const STAMP_UNIT = 7; // 資料上のセンキューカード対象到達数(運用者確認事項として設定可能)
+export const STAMP_UNIT = 7; // 確定仕様: 7スタンプごとにセレモニー対象(ダイナー既存台帳・Notion資料とも7回基準。仮設定ではない)
 
 const visitDate = v => String(v.visitAt || "").slice(0, 10);
 

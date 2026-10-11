@@ -7,6 +7,10 @@ import * as Ce from "../core/ceremony.js";
 import { personStats, STAMP_UNIT } from "../core/aggregate.js";
 import { buildHistory } from "../core/history.js";
 import { detectDrift } from "../core/drift.js";
+import { preflight, setCutover } from "../core/cutover.js";
+import { adoptDinerInfo, adoptDinerName, appendLegacyTokoNote, rescanPlan, candidateSummary } from "../core/adopt.js";
+import { applyPlan } from "../tools/migrate-lib.js";
+import { parseMacroPaste } from "../core/notion-paste.js";
 import { renderMacro, analyzeMacro, copyText } from "../core/macro.js";
 import { parseTimeline, finalizeTimeline } from "../core/timeline.js";
 
@@ -15,7 +19,7 @@ const safeUrl = u => /^https?:\/\/\S+$/i.test(String(u ?? "").trim()) ? String(u
 const h = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 const S = { boot: null, d: null, view: "home", edit: false, pid: null, q: "", evId: null, evTab: "overview", tl: null, cer: {}, arch: {} };
-const NAV = [["home", "HOME"], ["customers", "顧客"], ["candidates", "照合候補"], ["events", "イベント"], ["ceremony", "セレモニー"], ["archive", "アーカイブ"]];
+const NAV = [["home", "HOME"], ["customers", "顧客"], ["candidates", "照合候補"], ["cutover", "切替"], ["events", "イベント"], ["ceremony", "セレモニー"], ["archive", "アーカイブ"]];
 const label = () => $("#who").value;
 const val = id => document.getElementById(id)?.value ?? "";
 const STATUS_JA = { draft: "下書き", scheduled: "開催予定", postponed: "延期", cancelled: "中止", held: "開催済み" };
@@ -91,15 +95,54 @@ function vPerson() {
 // ---------- 照合候補 ----------
 function vCandidates() {
   const cands = S.d.links.filter(l => l.linkStatus !== "confirmed");
+  const held = cands.filter(l => l.linkStatus === "unresolved").length;
   if (!cands.length) return '<div class="card"><p>未確認の候補はありません</p></div>';
-  return `<div class="card mut">名前の一致は候補にすぎません。自動では統合されません。確認するまで集計に含まれません。</div>` + cands.map(l => {
-    const pids = l.candidatePersonIds?.length ? l.candidatePersonIds : [l.personId];
-    const tokoName = S.boot.tokoNames?.[l.sourceId] || l.sourceId;
-    return `<div class="card"><div class="row"><span class="tag toko">常若亭</span><b>${h(tokoName)}</b><span class="tag ${l.linkStatus === "unresolved" ? "" : "warn"}">${l.linkStatus === "unresolved" ? "保留中" : "未確認"}</span>${l.basis === "ambiguous-name" ? '<span class="tag warn">候補が複数(曖昧)</span>' : ""}</div>
-    <div class="row"><label>ダイナー側の候補人物<select id="cp-${h(l.id)}">${pids.map(pid => { const p = S.d.persons.find(x => x.id === pid); return p && !p.mergedInto ? `<option value="${h(pid)}">${h(nameOf(p))}</option>` : ""; }).join("")}</select></label>
-    <label>この常若亭の客のキャラ名<input type="text" id="cn-${h(l.id)}" value="${h(tokoName)}"></label></div>
+  const show = v => v ?? "-";
+  return `<div class="card"><b>未確認 ${cands.length}件(うち保留 ${held}件)</b><p class="mut">名前の一致は候補にすぎません。自動では統合されません。確認するまで集計・共通備考には接続されません。<br>本人かどうかの判断材料: 来店日・来店数・旧名・備考/DMの有無(内容は表示しません)。分からなければ「保留」のままで構いません。</p></div>` + cands.map(l => {
+    const sm = candidateSummary(l, S.d, S.d.shop, S.d.shop.toko?.profiles);
+    return `<div class="card"><div class="row"><span class="tag toko">常若亭</span><b>${h(sm.toko.name)}</b><span class="mut">来店${sm.toko.visits}件・最終${h(show(sm.toko.lastVisit))}${sm.toko.hasLegacyNote ? "・旧備考あり" : ""}</span><span class="tag ${l.linkStatus === "unresolved" ? "" : "warn"}">${l.linkStatus === "unresolved" ? "保留中" : "未確認"}</span>${sm.ambiguous ? '<span class="tag warn">候補が複数(曖昧)</span>' : ""}</div>
+    <table><tr><th>ダイナー側の候補</th><th>旧名</th><th>来店</th><th>Ver♥</th><th>最終来店</th><th>備考/DM</th></tr>${sm.candidates.map(c => `<tr><td><b>${h(c.name)}</b></td><td>${c.previousNames.map(h).join(", ") || "-"}</td><td>${c.dinerVisits}</td><td>${c.verStamps}</td><td>${h(show(c.lastVisit))}</td><td>${c.hasNote ? "備考" : ""} ${c.hasDm ? "DM" : ""}</td></tr>`).join("")}</table>
+    <div class="row"><label>確定先の人物<select id="cp-${h(l.id)}">${sm.candidates.map(c => `<option value="${h(c.personId)}">${h(c.name)}</option>`).join("")}</select></label>
+    <label>この常若亭の客のキャラ名<input type="text" id="cn-${h(l.id)}" value="${h(sm.toko.name)}"></label></div>
     <div class="row"><button class="b pri" data-act="candconfirm" data-id="${h(l.id)}">同じ人物の別キャラとして確定</button><button class="b" data-act="candreject" data-id="${h(l.id)}">別人として確定(独立登録)</button><button class="b" data-act="candhold" data-id="${h(l.id)}">保留</button></div></div>`;
   }).join("");
+}
+
+// ---------- 切替(備考・DMの正本一本化) ----------
+function preInputs() { return { persons: S.d.persons, links: S.d.links, dinerCustomers: S.d.shop.diner?.customers ?? null, tokoProfiles: S.d.shop.toko?.profiles ?? null }; }
+function driftRows() {
+  const out = []; const dc = S.d.shop.diner?.customers; if (!dc) return out;
+  for (const c of dc) {
+    const l = S.d.links.find(x => x.sourceSystem === "diner" && x.sourceId === c.id && x.linkStatus === "confirmed"); if (!l) continue;
+    let p = S.d.persons.find(x => x.id === l.personId); let n = 0; while (p?.mergedInto && n++ < 5) p = S.d.persons.find(x => x.id === p.mergedInto); if (!p) continue;
+    const ch = S.d.characters.find(x => x.id === l.characterId);
+    const fields = []; if (String(c.customerNote ?? "").replace(/\r\n/g, "\n").trim() !== String(p.customerNote ?? "").trim()) fields.push("customerNote"); if (String(c.xDmUrl ?? "").trim() !== String(p.xDmUrl ?? "").trim()) fields.push("xDmUrl");
+    const nameDiff = ch && c.customerName !== ch.currentName && !ch.previousNames.includes(c.customerName);
+    if (fields.length || nameDiff) out.push({ c, p, ch, fields, nameDiff });
+  }
+  return out;
+}
+function vCutover() {
+  const cut = S.d.cutover || {}; const modeJa = m => m === "master" ? "共通マスターが正本" : "従来(店舗内)";
+  const sec = sys => {
+    const pre = preflight(preInputs(), sys);
+    return `<div class="card"><h2>${sys === "diner" ? "ダイナー" : "常若亭"} <span class="tag ${(cut[sys + "Mode"] || "off") === "master" ? "warn" : ""}">${modeJa(cut[sys + "Mode"])}</span></h2>
+    ${pre.checks.map(c => `<div>${c.ok ? "✅" : c.blocking ? "❌" : "⚠️"} ${h(c.label)} <span class="mut">${h(c.detail)}</span></div>`).join("")}
+    <div class="row"><button class="b pri" data-act="cutset" data-sys="${sys}" data-mode="master" ${pre.ok && (cut[sys + "Mode"] || "off") !== "master" ? "" : "disabled"}>共通マスターを正本にする</button><button class="b" data-act="cutset" data-sys="${sys}" data-mode="off" ${(cut[sys + "Mode"] || "off") === "master" ? "" : "disabled"}>従来に戻す(旧フィールドは凍結のまま保持)</button></div>
+    <p class="mut">フラグだけを切り替えます。店舗アプリは「連携版」を配信するまで従来のまま動きます(手順は MIGRATION_RUNBOOK)。</p></div>`;
+  };
+  const rows = driftRows();
+  const legacy = (S.d.shop.toko?.profiles || []).filter(p => String(p.notes ?? "").trim()).map(p => ({ p, l: S.d.links.find(x => x.sourceSystem === "toko" && x.sourceId === p.id && x.linkStatus === "confirmed") })).filter(x => x.l);
+  return `<div class="card mut">備考・DMリンクの正本を共通マスターに一本化するための画面です。切替前にダイナー側/常若亭側の既存値を失わないよう、差異を確認して取り込み/維持を選びます。店舗側の元フィールドは削除・上書きしません。</div>
+  ${sec("diner")}${sec("toko")}
+  <div class="card"><h3>店舗の新規客を共通マスターへ追加(再スキャン)</h3><p class="mut">移行後に店舗で増えた顧客/プロフィールだけを追加します(既存は上書きしません・同名は候補として追加され自動統合しません)。</p><button class="b" data-act="rescan">再スキャンを実行</button></div>
+  <div class="card"><h3>ダイナー側と共通で違う項目(${rows.length}件)</h3>${rows.map(r => `<div class="row"><b>${h(r.ch?.currentName ?? r.c.customerName)}</b>
+    ${r.fields.includes("customerNote") ? `<span class="tag warn">備考が違う</span>` : ""}${r.fields.includes("xDmUrl") ? `<span class="tag warn">DMが違う</span>` : ""}${r.nameDiff ? `<span class="tag warn">名前が違う(ダイナー: ${h(r.c.customerName)})</span>` : ""}
+    ${r.fields.length ? `<button class="b" data-act="adopt" data-c="${h(r.c.id)}" data-f="${r.fields.join(",")}" data-p="${h(r.p.id)}" data-rev="${r.p.revision}">ダイナー側の値を共通へ取り込む</button>` : ""}
+    ${r.nameDiff ? `<button class="b" data-act="adoptname" data-ch="${h(r.ch.id)}" data-n="${h(r.c.customerName)}">名前を改名として取り込む</button>` : ""}</div>
+    ${r.fields.length ? `<details><summary class="mut">値を比較</summary><table><tr><th></th><th>ダイナー店舗側</th><th>共通(現在)</th></tr>${r.fields.map(f => `<tr><td>${f === "xDmUrl" ? "DM" : "備考"}</td><td style="white-space:pre-wrap">${h(r.c[f])}</td><td style="white-space:pre-wrap">${h(r.p[f])}</td></tr>`).join("")}</table></details>` : ""}`).join("") || '<p class="mut">差異なし</p>'}
+    <p class="mut">「共通を維持」の場合は何もしなくて構いません(店舗側の値は凍結され、切替後は共通の値が表示されます)が、切替前チェックは差異が残っている間は通りません。差異を残したまま切り替えたい場合は、先に取り込みで揃えてください。</p></div>
+  <div class="card"><h3>常若亭の旧備考(確認済みの人物のみ・参照用)</h3>${legacy.map(x => `<div class="row"><b>${h(x.p.name)}</b><details><summary class="mut">旧備考を見る</summary><div style="white-space:pre-wrap">${h(x.p.notes)}</div></details><button class="b" data-act="applegacy" data-id="${h(x.l.personId)}" data-n="${h(x.p.id)}">共通備考の末尾へ追記</button></div>`).join("") || '<p class="mut">該当なし</p>'}<p class="mut">常若亭の旧備考は自動では取り込まれません。必要なものだけ明示的に追記します(元の旧備考は削除されません)。</p></div>`;
 }
 
 // ---------- イベント ----------
@@ -126,7 +169,12 @@ function vOcc(o) {
 function vMacros(o) {
   const grp = r => o.macros.map((m, i) => ({ m, i })).filter(x => x.m.role === r);
   const block = r => `<div class="card"><h3>${r}</h3>${grp(r).map(({ m, i }) => { const a = analyzeMacro(m.body); return `<div><b>${h(m.title)}</b> <button class="b pri" data-act="copymacro" data-id="${h(o.id)}" data-i="${i}">コピー</button> <button class="b dng" data-act="delmacro" data-id="${h(o.id)}" data-rev="${o.revision}" data-i="${i}">削除</button><pre class="macro">${h(m.body)}</pre>${a.warnings.map(w => `<div class="warn mut">⚠ ${h(w)}</div>`).join("")}</div>`; }).join("") || '<p class="mut">なし</p>'}</div>`;
-  return block("Kaya") + block("Toushin") + `<div class="card"><h3>マクロ追加(原文のまま保存)</h3><div class="row"><input type="text" id="mtitle" placeholder="題名" style="max-width:240px"><select id="mrole" style="max-width:140px"><option>Kaya</option><option>Toushin</option></select></div><textarea id="mbody" placeholder="/yell … ※改行・<t>・記号をそのまま貼り付け"></textarea><button class="b pri" data-act="addmacro" data-id="${h(o.id)}" data-rev="${o.revision}">追加</button></div>`;
+  return block("Kaya") + block("Toushin") + `<div class="card"><h3>マクロ追加(原文のまま保存)</h3><div class="row"><input type="text" id="mtitle" placeholder="題名" style="max-width:240px"><select id="mrole" style="max-width:140px"><option>Kaya</option><option>Toushin</option></select></div><textarea id="mbody" placeholder="/yell … ※改行・<t>・記号をそのまま貼り付け"></textarea><button class="b pri" data-act="addmacro" data-id="${h(o.id)}" data-rev="${o.revision}">追加</button></div>
+  <div class="card"><h3>Notion/テキストから一括取り込み(貼り付け)</h3><p class="mut">Notionのページ本文をコピー(またはMarkdownエクスポートの中身)して貼り付けます。通信・API連携は使いません。コードブロック内、または「/」で始まる行が主体の節だけをマクロ候補にし、文章は取り込みません。本文は加工しません。</p>
+  <textarea id="pastesrc" placeholder="Notionの本文を貼り付け">${h(S.paste?.src ?? "")}</textarea><button class="b" data-act="pasteparse">候補を作る</button>
+  ${S.paste ? `${S.paste.res.blocks.map((b, i) => `<div class="card"><label><input type="checkbox" id="pk-${i}" checked> 取り込む</label><div class="row"><input type="text" id="pt-${i}" value="${h(b.title)}"><select id="pr-${i}" style="max-width:140px"><option value="" ${b.role ? "" : "selected"}>役割を選択</option><option ${b.role === "Kaya" ? "selected" : ""}>Kaya</option><option ${b.role === "Toushin" ? "selected" : ""}>Toushin</option></select></div><textarea id="pb-${i}">${h(b.body)}</textarea></div>`).join("")}
+  ${S.paste.res.skipped.length ? `<p class="mut">取り込み対象外: ${S.paste.res.skipped.map(k => `${h(k.title)}(${k.lines}行)`).join(" / ")}</p>` : ""}
+  ${S.paste.res.blocks.length ? `<button class="b pri" data-act="pastesave" data-id="${h(o.id)}" data-rev="${o.revision}">選んだ候補を追加</button>` : '<p class="warn">マクロ候補が見つかりませんでした</p>'}` : ""}</div>`;
 }
 function tlView(t) {
   return `<div class="cols3"><div class="h">Kaya</div><div class="h">タイミング・合図・共通条件</div><div class="h">Toushin</div>${t.rows.map(r => `${r.phase ? `<div class="mut" style="grid-column:1/-1">▼ ${h(r.phase)}</div>` : ""}<div class="cell">${h(r.kaya)}</div><div class="cell">${h(r.cue)}</div><div class="cell">${h(r.toushin)}</div>`).join("")}</div>${t.unclassified?.length ? `<p class="warn">未分類 ${t.unclassified.length}行: ${t.unclassified.map(u => h(u.text)).join(" / ")}</p>` : ""}`;
@@ -201,7 +249,7 @@ function render() {
   if (S.lastKey === key) document.querySelectorAll("#view [id]").forEach(el => { if (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && !S.clear?.has(el.id)) typed[el.id] = el.value; });
   S.lastKey = key; S.clear = null;
   renderNav(); $("#banner").textContent = S.boot.banner;
-  const v = { home: vHome, customers: vCustomers, candidates: vCandidates, events: vEvents, ceremony: vCeremony, archive: vArchive }[S.view];
+  const v = { home: vHome, customers: vCustomers, candidates: vCandidates, cutover: vCutover, events: vEvents, ceremony: vCeremony, archive: vArchive }[S.view];
   const keep = document.activeElement?.id, pos = document.activeElement?.selectionStart;
   $("#view").innerHTML = v();
   for (const [id, v_] of Object.entries(typed)) { const el = document.getElementById(id); if (el && el.value !== v_ && !(el.tagName === "SELECT" && ![...el.options].some(o => o.value === v_))) el.value = v_; }
@@ -248,6 +296,13 @@ const ACTIONS = {
     const f = finalizeTimeline({ rows, unclassified: rest, sourceText: t.sourceText }, { acceptUnclassified: true });
     await setOcc(d.id, d.rev, { timeline: f.timeline }); S.tl = null;
   }, "タイムラインを保存しました"),
+  cutset: d => confirm(d.mode === "master" ? "共通マスターを正本にします(フラグのみの切替。店舗アプリが連携版でなければ従来のままです)。よろしいですか?" : "従来(店舗内)に戻します。よろしいですか?") && run(() => setCutover(S.boot.store, d.sys, d.mode, preflight(preInputs(), d.sys), L()), "切替フラグを更新しました"),
+  adopt: d => confirm("ダイナー店舗側の値を共通へ取り込みます(共通の現在値は上書きされます。履歴から取り消せます)。よろしいですか?") && run(() => adoptDinerInfo(S.boot.store, d.p, Number(d.rev), S.d.shop.diner.customers.find(x => x.id === d.c), d.f.split(","), L()), "取り込みました"),
+  adoptname: d => confirm("ダイナー側の名前に改名として更新します(旧名は保持)。よろしいですか?") && run(() => adoptDinerName(S.boot.store, d.ch, d.n, L()), "改名として取り込みました"),
+  applegacy: d => confirm("旧備考を共通備考の末尾へ追記します(元の旧備考は残ります)。よろしいですか?") && run(async () => { const p = S.d.persons.find(x => x.id === d.id); const prof = S.d.shop.toko.profiles.find(x => x.id === d.n); await appendLegacyTokoNote(S.boot.store, d.id, p.revision, prof.notes, L()); }, "追記しました"),
+  rescan: () => run(async () => { const sh = S.d.shop; const plan = rescanPlan({ dinerCustomers: sh.diner?.customers ?? [], tokoProfiles: sh.toko?.profiles ?? [] }, `rescan-${Date.now().toString(36)}`); const r = await applyPlan(S.boot.store, plan); toast(`追加 ${r.created}件(既存で内容が違うため触れなかったもの ${r.skippedDiffering.length}件)`); }),
+  pasteparse: () => { const src = val("pastesrc"); S.paste = { src, res: parseMacroPaste(src) }; render(); },
+  pastesave: d => run(async () => { const o = S.d.occs.find(x => x.id === d.id); const add = []; S.paste.res.blocks.forEach((b, i) => { if (!document.getElementById("pk-" + i).checked) return; const role = val("pr-" + i); if (!role) throw new Error("役割(Kaya/Toushin)を選んでください"); add.push({ title: val("pt-" + i), role, body: val("pb-" + i) }); }); if (!add.length) throw new Error("取り込む候補がありません"); await setOcc(d.id, d.rev, { macros: [...o.macros, ...add] }); S.paste = null; }, "マクロを追加しました"),
   asearch: () => { S.arch = { store: val("astore"), name: val("aname"), year: val("ayear") }; render(); },
   cerpick: d => { S.view = "ceremony"; S.cer = { pid: d.id }; render(); },
   cerset: () => { S.cer = { ...S.cer, stamp: val("cstamp"), cname: val("cname"), shop: val("cshop"), date: val("cdate"), thanks: document.getElementById("cthanks") ? val("cthanks") : S.cer.thanks }; render(); },

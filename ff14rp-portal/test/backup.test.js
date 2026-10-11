@@ -62,3 +62,34 @@ test("ROL-01 エミュレータへ全型を復元し全件一致/CLIがPASS、�
   const prod = spawnSync("node", ["tools/backup-verify.mjs", "verify", "--dir", good.dir, "--project", "pixies-diner"], { encoding: "utf8" });
   assert.notEqual(prod.status, 0); assert.match(prod.stderr, /禁止/);
 });
+
+function makeDinerBackup(root) {
+  const dir = fs.mkdtempSync(path.join(root, "dbk-")); const docs = [];
+  const vis = (i, o) => docs.push({ path: `pixiesVisits/v${i}`, fields: { orderType: { stringValue: o.t ?? "VER" }, verCounted: { booleanValue: !!o.c }, verCountExclusion: { stringValue: o.x ?? "" }, verCountOverride: { stringValue: o.o ?? "" }, customerId: { stringValue: "c1" } } });
+  vis(1, { c: true }); vis(2, { c: true, o: "counted" }); vis(3, { c: false, x: "no_x_link" }); vis(4, { c: false, x: "not_ver", t: "A" });
+  docs.push({ path: "pixiesCustomers/c1", fields: { customerName: { stringValue: "架空" } } });
+  const file = path.join(dir, "data.jsonl"); fs.writeFileSync(file, docs.map(d => JSON.stringify(d)).join("\n") + "\n");
+  fs.writeFileSync(path.join(dir, "checksums.sha256"), `${crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")}  data.jsonl\n`);
+  return dir;
+}
+test("PC Gate統合ランナー: 合格時ALL_PASS/期待値違いFAIL/未指定はINCOMPLETE・Ver基準を来店ID集計で検証(エミュレータ必須)", { skip: !process.env.FIRESTORE_EMULATOR_HOST }, () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gate-")); const d = makeDinerBackup(tmp); const out = path.join(tmp, "r.json");
+  const run = extra => spawnSync("node", ["tools/pc-gate-check.mjs", "--diner-backup", d, "--out", out, "--diner-expect-docs", "5", "--diner-expect-collections", "2", ...extra], { encoding: "utf8", env: { ...process.env } });
+  let r = run(["--ver-expect", "counted:2,notCountedWithReason:2,overrideCounted:1"]);
+  let rep = JSON.parse(fs.readFileSync(out, "utf8"));
+  assert.equal(rep.steps.find(s => s.name === "backup:diner").result, "PASS", r.stdout); assert.equal(rep.steps.find(s => s.name === "ver-baseline:diner").result, "PASS");
+  assert.equal(rep.verdict, "INCOMPLETE"); assert.equal(r.status, 3); // toko/hostingが未指定
+  r = run(["--ver-expect", "counted:186,notCountedWithReason:449,overrideCounted:6"]); rep = JSON.parse(fs.readFileSync(out, "utf8"));
+  assert.equal(rep.steps.find(s => s.name === "ver-baseline:diner").result, "FAIL"); assert.equal(rep.verdict, "FAIL"); assert.equal(r.status, 1);
+  assert.ok(!JSON.stringify(rep).includes("架空"));
+});
+test("PowerShellスクリプト静的検査: UTF-8 BOM・CRLF・PowerShell7専用構文なし・npm/npx.cmd使用・本番ID/接続なし", () => {
+  for (const f of ["tools/verify-backup.ps1", "tools/pc-gate-check.ps1"]) {
+    const buf = fs.readFileSync(f); assert.deepEqual([...buf.subarray(0, 3)], [0xef, 0xbb, 0xbf], `${f}: BOMなし(5.1で日本語が化ける)`);
+    const t = buf.toString("utf8"); assert.ok(t.includes("\r\n"), `${f}: CRLFでない`);
+    const code = t.split("\n").filter(l => !l.trim().startsWith("#")).join("\n");
+    assert.ok(!/&&|\|\||\?\?|\?\.|\s\?\s.+\s:\s/.test(code.replace(/"[^"]*"/g, '""')), `${f}: PowerShell 7専用構文の疑い`);
+    assert.ok(!/pixies-diner|tokowakatei-receipt|firestore\.googleapis/.test(code), `${f}: コード部に本番識別子を含む`);
+  }
+  assert.match(fs.readFileSync("tools/verify-backup.ps1", "utf8"), /npx\.cmd/);
+});

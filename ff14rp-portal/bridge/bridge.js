@@ -1,0 +1,117 @@
+// 店舗アプリ用「共通顧客マスター連携ブリッジ」。
+// - 切替フラグ(rpMigrationBatches/cutover)が <system>Mode==="master" のときだけ有効。それ以外/読込失敗は何もしない(=従来動作)。
+// - 備考(customerNote)とDMリンク(xDmUrl)の正本を共通Personにする。店舗側の旧フィールドは読み書きとも削除・上書きしない(凍結)。
+// - SDK関数は注入(ブラウザは店舗アプリが読み込んだgstatic版、Nodeテストはfirebase npm)。
+import { MASTER as M } from "../core/collections.js";
+import { personIdFor, characterIdFor, linkId } from "../core/identity-plan.js";
+
+export const BRIDGE_VERSION = "0.1.0";
+const SRC = { diner: "pixiesCustomers", toko: "customerProfiles" };
+const iso = () => new Date().toISOString();
+const isUrl = v => /^https?:\/\/\S+$/i.test(String(v ?? "").trim());
+const inactive = (mode, system) => ({ active: false, mode, system, version: BRIDGE_VERSION, overlay: c => c, overlayProfile: p => p, subscribe() {}, linked: () => false,
+  async persistInfo() {}, async persistInfoMany() {}, async persistNote() { throw new Error("master bridge inactive"); } });
+
+export async function createBridge({ db, sdk, system, label = "店舗画面" }) {
+  const { doc, getDoc, getDocs, collection, onSnapshot, runTransaction } = sdk;
+  let mode = "off";
+  try { const f = await getDoc(doc(db, M.migrationBatches, "cutover")); if (f.exists()) mode = f.data()[`${system}Mode`] || "off"; }
+  catch (e) { console.warn("cutover flag unreadable -> legacy mode", e); return inactive("off", system); }
+  if (mode !== "master") return inactive(mode, system);
+
+  const sourceType = SRC[system];
+  let persons = new Map(), links = new Map(), listeners = [];
+  const loadAll = async () => {
+    persons = new Map((await getDocs(collection(db, M.persons))).docs.map(d => [d.id, d.data()]));
+    links = new Map((await getDocs(collection(db, M.sourceLinks))).docs.map(d => d.data()).filter(l => l.sourceSystem === system && l.sourceType === sourceType).map(l => [l.sourceId, l]));
+  };
+  await loadAll();
+  const resolve = pid => { let p = persons.get(pid), id = pid, n = 0; while (p?.mergedInto && n++ < 5) { id = p.mergedInto; p = persons.get(id); } return p ? { id, p } : null; };
+  const confirmedLink = sid => { const l = links.get(sid); return l && l.linkStatus === "confirmed" ? l : null; };
+  const txResolve = async (tx, pid) => { let id = pid; for (let i = 0; i < 5; i++) { const s = await tx.get(doc(db, M.persons, id)); if (!s.exists()) return null; const d = s.data(); if (!d.mergedInto) return { id, ref: s.ref, d }; id = d.mergedInto; } return null; };
+  const cleanNote = v => String(v ?? "").replace(/\r\n/g, "\n");
+
+  const logDoc = (tx, personId, diffs, kind) => tx.set(doc(db, M.identityChanges, `chg-${system}app-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`), { kind, label, reason: `${system}-app`, at: iso(), diffs, undone: false, revision: 1, updatedAt: iso() });
+
+  const bridge = {
+    active: true, mode, system, version: BRIDGE_VERSION,
+    linked: sid => !!confirmedLink(sid),
+    /** ダイナー顧客オブジェクトへ共通値を重ねる。連携済みのみ。未連携は従来値のまま。 */
+    overlay(c) {
+      const l = confirmedLink(c.customerId); const r = l && resolve(l.personId);
+      if (!r) { c._master = false; return c; }
+      c.xDmUrl = r.p.xDmUrl || ""; c.customerNote = r.p.customerNote || ""; c._master = true; c._personId = r.id; return c;
+    },
+    /** 常若亭プロフィールへ共通備考を重ねる。旧備考(legacyNotes)は参照用に保持。 */
+    overlayProfile(p) {
+      const l = confirmedLink(p.id); const r = l && resolve(l.personId);
+      if (!r) return { ...p, _master: false };
+      return { ...p, notes: r.p.customerNote || "", legacyNotes: p.notes || "", _master: true, _personId: r.id };
+    },
+    subscribe(cb) {
+      let queued = false; const fire = () => { if (queued) return; queued = true; Promise.resolve().then(() => { queued = false; cb(); }); };
+      listeners.push(onSnapshot(collection(db, M.persons), s => { persons = new Map(s.docs.map(d => [d.id, d.data()])); fire(); }, e => console.warn(e)));
+      listeners.push(onSnapshot(collection(db, M.sourceLinks), s => { links = new Map(s.docs.map(d => d.data()).filter(l => l.sourceSystem === system && l.sourceType === sourceType).map(l => [l.sourceId, l])); fire(); }, e => console.warn(e)));
+    },
+    /** ダイナー顧客の備考/DMを共通Personへ保存。未連携なら新規Personを作成(既存人物へは自動統合しない)。 */
+    async persistInfo(c, { allowClear = true } = {}) {
+      if (system !== "diner") throw new Error("persistInfo is diner-only");
+      const sid = c.customerId;
+      const next = { customerNote: cleanNote(c.customerNote), xDmUrl: String(c.xDmUrl ?? "").trim() };
+      if (next.xDmUrl && !isUrl(next.xDmUrl)) throw new Error("XのDMリンクは http:// または https:// から入力してね");
+      await runTransaction(db, async tx => {
+        const lref = doc(db, M.sourceLinks, linkId("diner", sourceType, sid));
+        const ls = await tx.get(lref);
+        if (!ls.exists()) {
+          // 新規顧客(移行後に店舗で登録)。独立したPerson/Character/SourceLinkを作る。
+          const pid = personIdFor("diner", sid), cid = characterIdFor("diner", sid);
+          const ps = await tx.get(doc(db, M.persons, pid));
+          if (ps.exists()) throw new Error("共通マスターに同じIDの人物が既に存在します。総合DBで確認してください");
+          const t = iso();
+          tx.set(doc(db, M.persons, pid), { primaryCharacterId: cid, customerNote: next.customerNote, xDmUrl: next.xDmUrl, origin: "diner", createdAt: t, createdBy: `${system}-app`, revision: 1, updatedAt: t });
+          tx.set(doc(db, M.characters, cid), { personId: pid, currentName: c.customerName, previousNames: [], legacyNameCandidates: [], world: null, origin: "diner", createdAt: t, revision: 1, updatedAt: t });
+          tx.set(lref, { sourceSystem: "diner", sourceType, sourceId: sid, personId: pid, characterId: cid, linkStatus: "confirmed", basis: "diner-app-new", createdAt: t, revision: 1, updatedAt: t });
+          logDoc(tx, pid, [{ type: "create", col: M.persons, id: pid, after: {} }, { type: "create", col: M.characters, id: cid, after: {} }, { type: "create", col: M.sourceLinks, id: lref.id, after: {} }], "appNewCustomer");
+          return;
+        }
+        const l = ls.data();
+        if (l.linkStatus !== "confirmed") throw new Error("この顧客の共通マスター連携が未確認です。総合DBで確認してください");
+        const r = await txResolve(tx, l.personId); if (!r) throw new Error("共通マスターの人物が見つかりません");
+        const patch = {};
+        for (const f of ["customerNote", "xDmUrl"]) {
+          if (next[f] === (r.d[f] ?? "")) continue;
+          if (!allowClear && next[f] === "" && (r.d[f] ?? "") !== "") continue; // 一括取込では空で既存値を消さない
+          patch[f] = next[f];
+        }
+        if (!Object.keys(patch).length) return;
+        const before = Object.fromEntries(Object.keys(patch).map(f => [f, r.d[f] ?? null]));
+        tx.set(r.ref, { ...r.d, ...patch, revision: (r.d.revision || 1) + 1, updatedAt: iso() });
+        logDoc(tx, r.id, [{ type: "update", col: M.persons, id: r.id, before, after: patch, revisionAfter: (r.d.revision || 1) + 1 }], "editPersonInfo");
+      });
+      await loadAll();
+    },
+    async persistInfoMany(customers) { for (const c of customers) await bridge.persistInfo(c, { allowClear: false }); },
+    /** 常若亭: 共通備考のみ保存。連携確認済みの人物だけ(未確認は呼び出し側で従来保存)。 */
+    async persistNote(profileId, notes) {
+      if (system !== "toko") throw new Error("persistNote is toko-only");
+      const next = cleanNote(notes);
+      await runTransaction(db, async tx => {
+        const ls = await tx.get(doc(db, M.sourceLinks, linkId("toko", sourceType, profileId)));
+        if (!ls.exists() || ls.data().linkStatus !== "confirmed") throw Object.assign(new Error("not-linked"), { code: "not-linked" });
+        const r = await txResolve(tx, ls.data().personId); if (!r) throw new Error("共通マスターの人物が見つかりません");
+        if (next === (r.d.customerNote ?? "")) return;
+        tx.set(r.ref, { ...r.d, customerNote: next, revision: (r.d.revision || 1) + 1, updatedAt: iso() });
+        logDoc(tx, r.id, [{ type: "update", col: M.persons, id: r.id, before: { customerNote: r.d.customerNote ?? null }, after: { customerNote: next }, revisionAfter: (r.d.revision || 1) + 1 }], "editPersonInfo");
+      });
+      await loadAll();
+    },
+    dispose() { listeners.forEach(u => u()); listeners = []; }
+  };
+  if (typeof document !== "undefined") {
+    const b = document.createElement("div"); b.id = "ff14rp-master-badge";
+    b.textContent = "共通顧客マスター連携中(備考・DMは総合DBと共通)";
+    b.style.cssText = "position:fixed;right:8px;bottom:8px;z-index:99999;background:#4b3f7a;color:#fff;font:11px system-ui;padding:3px 8px;border-radius:99px;opacity:.85;pointer-events:none";
+    document.body.append(b);
+  }
+  return bridge;
+}

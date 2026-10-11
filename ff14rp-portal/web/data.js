@@ -4,6 +4,7 @@ import { MemoryShopSource } from "../store/firestore-store.js";
 import { syntheticShops } from "../fixtures/synthetic.js";
 import { dryRun, applyPlan } from "../tools/migrate-lib.js";
 import { buildIndex } from "../core/aggregate.js";
+import { getCutover } from "../core/cutover.js";
 
 /** モード: demo(架空データ・メモリ) / firestore(portal-config.js が必要)。 */
 export async function bootstrap() {
@@ -45,10 +46,11 @@ export async function loadAll(boot) {
   const [persons, characters, links, occs, masters, records, draws, changes, templates] = await Promise.all([
     store.list(M.persons), store.list(M.characters), store.list(M.sourceLinks), store.list(M.eventOccurrences), store.list(M.eventMasters),
     store.list(M.ceremonyRecords), store.list(M.ceremonyDraws), store.list(M.identityChanges), store.list(M.ceremonyTemplates)]);
-  const [dv, tv, tc, ti, dc] = await Promise.all([tryList(src.diner, "pixiesVisits"), tryList(src.toko, "customerVisits"), tryList(src.toko, "customers"), tryList(src.toko, "items"), tryList(src.diner, "pixiesCustomers")]);
+  const [dv, tv, tc, ti, dc, tp] = await Promise.all([tryList(src.diner, "pixiesVisits"), tryList(src.toko, "customerVisits"), tryList(src.toko, "customers"), tryList(src.toko, "items"), tryList(src.diner, "pixiesCustomers"), tryList(src.toko, "customerProfiles")]);
   const shop = {
     diner: dv ? { visits: dv, customers: dc } : null,
-    toko: tv ? { visits: tv, sessionCustomers: tc || [], items: ti || [] } : null
+    toko: tv ? { visits: tv, sessionCustomers: tc || [], items: ti || [], profiles: tp } : null
   };
-  return { persons, characters, links, occs, masters, records, draws, changes, templates, shop, index: buildIndex({ persons, characters, links }) };
+  const cutover = await getCutover(store);
+  return { cutover, persons, characters, links, occs, masters, records, draws, changes, templates, shop, index: buildIndex({ persons, characters, links }) };
 }

@@ -1,0 +1,15 @@
+import { startStatic, launch, openApp, adminDb, seedDiner } from "./harness.mjs";
+const { db } = adminDb("demo-iso"); await seedDiner(db);
+const srv = await startStatic(process.argv[2]); const br = await launch(); const { page } = await openApp(br, srv.url); page.setDefaultTimeout(8000);
+await page.waitForTimeout(3000);
+await page.evaluate(() => { document.getElementById("manualOrderDetails").open = true; });
+await page.fill("#customerPickerSearch", "Test Beta"); await page.locator("#customerPicker button", { hasText: "Test Beta" }).first().click();
+console.log("ORDERTYPES:", (await page.innerText("#orderTypes")).replace(/\n/g, "|"));
+await page.locator("#orderTypes").getByText("Verセット").click();
+console.log("VERDRINK:", (await page.innerText("#verDrinkChoices")).replace(/\n/g, "|").slice(0, 160));
+await page.locator("#verFoodChoices").getByText("ポポトポタージュ").click();
+const dr = (await page.innerText("#verDrinkChoices")).split("\n").filter(x => x.trim() && !/^\d+$/.test(x.trim()))[0]; console.log("drink pick:", dr);
+await page.locator("#verDrinkChoices").getByText(dr, { exact: false }).first().click();
+console.log("payment:", await page.inputValue("#payment"), "| submit text:", await page.innerText("#submitLedger"), "| disabled:", await page.locator("#submitLedger").isDisabled());
+await page.click("#submitLedger"); await page.waitForTimeout(2500); console.log("toast:", await page.innerText("#toast"));
+await br.close(); srv.close(); process.exit(0);

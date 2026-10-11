@@ -5,7 +5,7 @@ import { setCutover, preflight } from "../../core/cutover.js";
 import { MASTER as M } from "../../core/collections.js";
 
 const [, , origDir, patchedDir] = process.argv;
-const results = []; const step = async (name, fn) => { try { await fn(); results.push(["PASS", name]); console.log("PASS", name); } catch (e) { results.push(["FAIL", name]); console.log("FAIL", name, "\n  ", e.message.split("\n")[0]); } };
+const allBlocked = []; const results = []; const step = async (name, fn) => { try { await fn(); results.push(["PASS", name]); console.log("PASS", name); } catch (e) { results.push(["FAIL", name]); console.log("FAIL", name, "\n  ", e.message.split("\n")[0]); } };
 const { db } = adminDb("demo-iso");
 const br = await launch();
 
@@ -20,7 +20,7 @@ async function prepare(mode) {
 async function session(dir) {
   const srv = await startStatic(dir); const app = await openApp(br, srv.url); app.page.setDefaultTimeout(8000);
   await app.page.waitForFunction(() => document.querySelector("#dataHeaderStatus")?.textContent && !document.querySelector("#setupError")?.offsetParent, null, { timeout: 15000 }).catch(() => {});
-  await app.page.waitForTimeout(2500); return { ...app, close: async () => { await app.ctx.close(); srv.close(); } };
+  await app.page.waitForTimeout(2500); return { ...app, close: async () => { allBlocked.push(...app.blocked); await app.ctx.close(); srv.close(); } };
 }
 async function pickCustomer(page, name) {
   await page.evaluate(() => { document.getElementById("manualOrderDetails").open = true; });
@@ -32,7 +32,11 @@ async function editInfo(page, name, { dm, note }) {
   await pickCustomer(page, name);
   if (dm !== undefined) await page.fill("#xDmUrl", dm);
   if (note !== undefined) await page.fill("#customerNote", note);
-  await page.click("#saveCustomerOnly"); await page.waitForTimeout(2500);
+  await page.click("#saveCustomerOnly"); await settle(page);
+}
+// 保存後の非同期書込み(Ver再判定等)が落ち着くまで待つ: Firestore上のVer判定が2回連続(1.5秒間隔)で同じになるまで
+async function settle(page) {
+  let prev = ""; for (let i = 0; i < 8; i++) { await page.waitForTimeout(1500); const cur = JSON.stringify(await visitFlags(db)); if (cur === prev) return; prev = cur; }
 }
 const localCustomer = async id => (await F.getDoc(F.doc(db, "pixiesCustomers", id))).data();
 
@@ -82,23 +86,25 @@ await step("[パッチ済み・master] 来店記帳(DMなしの顧客でも既�
   const n0 = (await F.getDocs(F.collection(db, "pixiesVisits"))).size;
   await s.page.click("#changeCustomerButton").catch(() => {});
   await pickCustomer(s.page, "Test Beta");
-  await s.page.locator("#orderTypes input, #orderTypes button, #orderTypes label").first().click().catch(() => {});
-  await s.page.fill("#payment", "1000").catch(() => {});
-  await s.page.click("#submitLedger"); await s.page.waitForTimeout(2500);
+  await s.page.locator("#orderTypes").getByText("Verセット").click();
+  await s.page.locator("#verFoodChoices").getByText("ポポトポタージュ").click();
+  await s.page.locator("#verDrinkChoices").getByText("D1").first().click();
+  await s.page.click("#submitLedger"); await settle(s.page);
   const n1 = (await F.getDocs(F.collection(db, "pixiesVisits"))).size;
-  assert.ok(n1 >= n0, "来店保存でエラーにならない(件数が減らない)");
-  const flags = await visitFlags(db); for (const k of Object.keys(before)) assert.deepEqual(flags[k], before[k]);
+  assert.equal(n1, n0 + 1, "来店が1件追加される");
+  const flags = await visitFlags(db); for (const k of Object.keys(before)) assert.deepEqual(flags[k], before[k]); // 既存来店は全て不変
+  const added = Object.keys(flags).filter(k => !(k in before)); assert.equal(added.length, 1); assert.equal(flags[added[0]].verCounted, true); // 新規Ver来店はDMありの客なので♥(従来ルール)
   await s.close();
 });
 await step("[パッチ済み・master] 既存顧客への名前統合は止まり、データは変化しない", async () => {
   await prepare("master"); const s = await session(patchedDir);
   const n0 = (await F.getDocs(F.collection(db, "pixiesCustomers"))).size;
   await pickCustomer(s.page, "Test Delta");
-  await s.page.fill("#existingCustomerName", "Test Beta"); await s.page.click("#saveCustomerOnly"); await s.page.waitForTimeout(1500);
+  await s.page.fill("#existingCustomerName", "Test Beta"); await s.page.click("#saveCustomerOnly"); await settle(s.page);
   assert.equal((await F.getDocs(F.collection(db, "pixiesCustomers"))).size, n0);
   assert.match(await s.page.innerText("#toast"), /人物の統合/);
   await s.close();
 });
-await step("外部通信ゼロ(許可: localhostと差し替え済みSDKのみ)", async () => { /* openAppのroute遮断で外部は常にabort。blockedは記録のみ */ });
+await step("外部通信ゼロ(許可: localhostと差し替え済みSDKのみ)", async () => { const bad = allBlocked.filter(u => /firestore|firebaseio|identitytoolkit|securetoken|googleapis\.com\/(v1|identitytoolkit)/.test(u)); assert.deepEqual(bad, [], "本番Firebase系への通信試行が遮断された"); console.log("   遮断した外部通信(件数/ホスト):", allBlocked.length, [...new Set(allBlocked.map(u => new URL(u).hostname))].join(",")); });
 await br.close();
 const fails = results.filter(r => r[0] === "FAIL").length; console.log(fails ? `ISOLATED FAIL ${fails}` : "ISOLATED 全PASS"); process.exit(fails ? 1 : 0);

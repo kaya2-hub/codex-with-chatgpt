@@ -46,11 +46,25 @@ try {
   await step("照合候補: 確定すると常若亭来店/注文が履歴に現れる", async () => {
     await nav("照合候補");
     const before = await page.locator('[data-act="candconfirm"]').count(); assert.equal(before, 4);
+    const t = await page.innerText("#view"); assert.match(t, /未確認 4件/); assert.match(t, /Ver♥/); assert.match(t, /曖昧/); // 判断材料と曖昧表示
     const id = await page.locator('[data-act="candconfirm"]').first().getAttribute("data-id");
     await page.click(`[data-act="candconfirm"][data-id="${id}"]`);
     await page.waitForFunction(n => document.querySelectorAll('[data-act="candconfirm"]').length === n, 3);
     await nav("顧客"); await page.fill("#q", "alpha"); await page.click("a:has-text('Test Alpha')");
     assert.match(await page.innerText("#view"), /架空紅茶 ×2 @300/);
+  });
+  await step("切替: 差異なしならpreflight合格→マスター正本化/従来へ戻す(フラグのみ・確認ダイアログ)", async () => {
+    await nav("切替");
+    let t = await page.innerText("#view"); assert.match(t, /全ダイナー顧客が確定リンク済み/); assert.match(t, /従来\(店舗内\)/);
+    // 直前の編集で共通とダイナー店舗側に差異がある → 切替は拒否され、取り込みで解消してから可能になる
+    assert.match(t, /差異/); assert.equal(await page.locator('[data-act="cutset"][data-sys="diner"][data-mode="master"]').isDisabled(), true);
+    await act("adopt"); await page.waitForFunction(() => document.body.innerText.includes("取り込みました"));
+    await page.waitForFunction(() => !document.querySelector('[data-act="adopt"]'));
+    await page.click('[data-act="cutset"][data-sys="diner"][data-mode="master"]');
+    await page.waitForFunction(() => document.body.innerText.includes("切替フラグを更新しました"));
+    assert.match(await page.innerText("#view"), /共通マスターが正本/);
+    await page.click('[data-act="cutset"][data-sys="diner"][data-mode="off"]');
+    await page.waitForFunction(() => !document.querySelector('[data-act="cutset"][data-sys="diner"][data-mode="off"]:not([disabled])'));
   });
   await step("イベント: マスター作成→開催回→マクロ追加→コピーが原文一致", async () => {
     await nav("イベント"); await page.fill("#mname", "E2Eイベント"); await act("mkmaster");
@@ -61,6 +75,15 @@ try {
     await page.waitForSelector('[data-act="copymacro"]'); await act("copymacro");
     const clip = await page.evaluate(() => navigator.clipboard.readText());
     assert.equal(clip, body);
+  });
+  await step("マクロ: Notion貼り付けから候補作成→役割選択→追加(本文不変・文章は対象外)", async () => {
+    await page.click('[data-act="evtab"][data-v="macros"]').catch(() => {});
+    const body = "/s 乾杯 <t>\n\n/wait 2\n/yell ♡";
+    await page.fill("#pastesrc", `## Kaya\n\`\`\`\n${body}\n\`\`\`\n## 補足\nこれは文章です。`);
+    await act("pasteparse"); await page.waitForSelector("#pb-0");
+    assert.equal(await page.inputValue("#pb-0"), body); assert.match(await page.innerText("#view"), /取り込み対象外: 補足/);
+    await act("pastesave"); await page.waitForFunction(() => document.body.innerText.includes("マクロを追加しました"));
+    assert.ok((await page.innerText("#view")).includes("/wait 2"));
   });
   await step("イベント: 過去日でも下書きのまま。開催済みへは明示操作のみ", async () => {
     assert.match(await page.innerText("#view"), /下書き/);

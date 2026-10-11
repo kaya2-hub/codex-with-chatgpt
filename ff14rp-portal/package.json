@@ -8,6 +8,7 @@
     "test": "node --test test/*.test.js",
     "test:emu": "firebase emulators:exec --only firestore --project demo-ff14rp \"node --test --test-concurrency=1 test/*.test.js\"",
     "test:e2e": "node test/e2e/run.mjs",
+    "test:isolated": "node test/isolated/run.mjs",
     "build": "node tools/build-web.mjs",
     "serve": "node tools/serve.mjs",
     "migrate:demo": "node tools/migrate.mjs plan --demo"

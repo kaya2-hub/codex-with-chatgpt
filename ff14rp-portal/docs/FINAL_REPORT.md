@@ -48,4 +48,12 @@
 第1回: 統合/分離と実施記録、undoの孤児、入力消失、ダーツ誤確定、rollbackの参照、DMリンクスキーム等。第2回: **blocker** — master後のoff復帰/読込失敗で過去Verが再判定される経路(連携版は「一度でもmasterにした/フラグ不明」では再判定を停止、過去来店の編集時の再判定も停止)。**major** — 連携失敗で記帳が止まる(通知のみで継続)、名前変更が共通へ届かない(改名同期)、同名別人の誤接続(名前ガード)、保存ごとの全件読込(廃止)、切替判定が古い状態で通る(直前に再読込)、Hosting差分が通信失敗でも合格(不合格化)、checksums無しでも合格(不合格化)、Windowsでの引用符(対応)。minor — CSV移行停止、secret-scan強化、Notion役割の引き継ぎ、placeholder設定の拒否、no-cacheヘッダ付与 等。未対応の軽微事項は `RISKS_AND_OPEN_ITEMS.md`。
 
 ## 検証結果(最終コミット時点)
-RESULTS_PLACEHOLDER
+| テスト | 結果 |
+|---|---|
+| `npm test`(メモリ+単体。エミュレータ専用11件はskip) | 60件中 pass 49 / fail 0 / skip 11 |
+| `npm run test:emu`(Firestoreエミュレータ `demo-ff14rp`。復元CLI・ブリッジ・トランザクション含む。ゲートランナー1件は入れ子起動不可のためskip) | 60件中 pass 59 / fail 0 / skip 1 |
+| `npm run test:e2e`(ポータルUI・Chromium・スマホ幅含む) | 全PASS(1回目の失敗0) |
+| `npm run test:isolated`(保存版ダイナー原本/連携版 9ステップ、常若亭連携版 3ステップ。外部通信遮断0件) | 全PASS |
+| `npm run scan`(機密混入検査) | 問題0件 |
+
+ゲートランナー(`pc-gate-check`)の統合テストは `npm test` 側で実行(自前でエミュレータを起動)し合格。PowerShell 5.1での実機実行・Windowsでの引数引用は未検証。

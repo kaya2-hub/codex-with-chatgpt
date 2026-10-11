@@ -31,4 +31,4 @@ for (const f of files) {
   rows.push({ file: f, status: s, ...(status ? { error: status } : {}), local: L ? { sha: sha(L).slice(0, 12), bytes: L.length } : null, remote: R ? { sha: sha(R).slice(0, 12), bytes: R.length } : null });
 }
 console.log(JSON.stringify({ base, rows, differentCount: different, note: "DIFFERENT/MISSINGがある場合、保存版は現行と一致しません。移行・店舗側改修の前に現行ソースを入手してください。" }, null, 2));
-process.exit(different ? 1 : 0);
+process.exitCode = different ? 1 : 0;

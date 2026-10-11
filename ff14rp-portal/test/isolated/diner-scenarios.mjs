@@ -4,7 +4,8 @@ import { startStatic, launch, openApp, adminDb, seedDiner, seedMaster, visitFlag
 import { setCutover, preflight } from "../../core/cutover.js";
 import { MASTER as M } from "../../core/collections.js";
 
-const [, , origDir, patchedDir] = process.argv;
+const origDir = process.env.FF14RP_ISO_ORIG_DIR || process.argv[2];
+const patchedDir = process.env.FF14RP_ISO_DINER_DIR || process.argv[3];
 const allBlocked = []; const results = []; const step = async (name, fn) => { try { await fn(); results.push(["PASS", name]); console.log("PASS", name); } catch (e) { results.push(["FAIL", name]); console.log("FAIL", name, "\n  ", e.message.split("\n")[0]); } };
 const { db } = adminDb("demo-iso");
 const br = await launch();

@@ -19,8 +19,8 @@ for (const [sys, src, out, extra] of [["diner", dSrc, pd, []], ["toko", tSrc, pt
   if (r.status !== 0) { console.error(`パッチ適用に失敗(${sys}): ${r.stderr}`); process.exit(r.status || 1); }
 }
 let fail = 0;
-for (const [label, script, ...args] of [["diner", "test/isolated/diner-scenarios.mjs", dSrc, pd], ["toko", "test/isolated/toko-scenarios.mjs", pt]]) {
-  const r = sh(["firebase", "emulators:exec", "--only", "firestore", "--project", "demo-iso", `node ${script} ${args.map(a => JSON.stringify(a)).join(" ")}`]);
+for (const [label, script] of [["diner", "test/isolated/diner-scenarios.mjs"], ["toko", "test/isolated/toko-scenarios.mjs"]]) {
+  const r = sh(["firebase", "emulators:exec", "--only", "firestore", "--project", "demo-iso", `node ${script}`], { env: { ...process.env, FF14RP_ISO_ORIG_DIR: dSrc, FF14RP_ISO_DINER_DIR: pd, FF14RP_ISO_TOKO_DIR: pt } });
   const lines = (r.stdout || "").split("\n").filter(l => /^(PASS|FAIL|ISOLATED|   )/.test(l)); console.log(`== ${label} ==\n${lines.join("\n")}`);
   if (r.status !== 0) fail++;
 }

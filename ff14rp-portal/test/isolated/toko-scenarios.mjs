@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { startStatic, launch, openApp, adminDb, seedMaster, F } from "./harness.mjs";
 import { setCutover, preflight } from "../../core/cutover.js";
 import { MASTER as M } from "../../core/collections.js";
-const patchedDir = process.argv[2];
+const patchedDir = process.env.FF14RP_ISO_TOKO_DIR || process.argv[2];
 const results = []; const step = async (name, fn) => { try { await fn(); results.push(1); console.log("PASS", name); } catch (e) { results.push(0); console.log("FAIL", name, "\n  ", e.message.split("\n")[0]); } };
 const master = adminDb("demo-iso").db, tdb = adminDb("demo-toko").db;
 const br = await launch();

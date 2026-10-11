@@ -10,6 +10,7 @@
     "test:e2e": "node test/e2e/run.mjs",
     "test:isolated": "node test/isolated/run.mjs",
     "build": "node tools/build-web.mjs",
+    "scan": "node tools/secret-scan.mjs",
     "serve": "node tools/serve.mjs",
     "migrate:demo": "node tools/migrate.mjs plan --demo"
   },

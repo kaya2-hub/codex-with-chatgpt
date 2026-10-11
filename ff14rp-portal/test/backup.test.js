@@ -72,7 +72,7 @@ function makeDinerBackup(root) {
   fs.writeFileSync(path.join(dir, "checksums.sha256"), `${crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")}  data.jsonl\n`);
   return dir;
 }
-test("PC Gate統合ランナー: 合格時ALL_PASS/期待値違いFAIL/未指定はINCOMPLETE・Ver基準を来店ID集計で検証(エミュレータ必須)", { skip: !process.env.FIRESTORE_EMULATOR_HOST }, () => {
+test("PC Gate統合ランナー: 合格時ALL_PASS/期待値違いFAIL/未指定はINCOMPLETE・Ver基準を来店ID集計で検証(ランナーが自らエミュレータを起動するため、既存エミュレータ内ではskip)", { skip: !!process.env.FIRESTORE_EMULATOR_HOST && "ランナーが自前でエミュレータを起動(入れ子不可)", timeout: 240000 }, () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gate-")); const d = makeDinerBackup(tmp); const out = path.join(tmp, "r.json");
   const run = extra => spawnSync("node", ["tools/pc-gate-check.mjs", "--diner-backup", d, "--out", out, "--diner-expect-docs", "5", "--diner-expect-collections", "2", ...extra], { encoding: "utf8", env: { ...process.env } });
   let r = run(["--ver-expect", "counted:2,notCountedWithReason:2,overrideCounted:1"]);
@@ -92,4 +92,8 @@ test("PowerShellスクリプト静的検査: UTF-8 BOM・CRLF・PowerShell7専�
     assert.ok(!/pixies-diner|tokowakatei-receipt|firestore\.googleapis/.test(code), `${f}: コード部に本番識別子を含む`);
   }
   assert.match(fs.readFileSync("tools/verify-backup.ps1", "utf8"), /npx\.cmd/);
+});
+test("SEC-02 リポジトリ検査: ff14rp-portal の作業ツリー/git履歴に機密・顧客データ・バックアップ・設定の実体がない", () => {
+  const r = spawnSync("node", ["tools/secret-scan.mjs"], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stdout);
 });

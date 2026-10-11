@@ -24,7 +24,7 @@ export function parseMacroPaste(text) {
     }
     if (inFence) { fence.push(line); continue; }
     const m = line.match(HEAD);
-    if (m) { flush(); title = m[2].trim(); role = roleOf(title) || role; continue; }
+    if (m) { flush(); title = m[2].trim(); role = roleOf(title); continue; }
     buf.push(line);
   }
   if (inFence && fence.length) skipped.push({ title, reason: "コードフェンスが閉じていないため取り込まず(貼り付け範囲を確認)", lines: fence.length });

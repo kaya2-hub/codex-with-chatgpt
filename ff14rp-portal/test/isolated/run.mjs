@@ -5,7 +5,7 @@
  * 全てFirestoreエミュレータ(demo-*)とローカルshimのみ。本番へ接続しない。実顧客データは使わない(架空fixture)。
  */
 import { spawnSync } from "node:child_process"; import fs from "node:fs"; import os from "node:os"; import path from "node:path"; import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { build } from "esbuild"; import { shellArgs } from "../../tools/proc.js";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const dSrc = process.env.FF14RP_DINER_SRC, tSrc = process.env.FF14RP_TOKO_SRC;
 if (!dSrc || !tSrc) { console.error("FF14RP_DINER_SRC / FF14RP_TOKO_SRC を設定してください(保存版ソースのフォルダ)"); process.exit(2); }
@@ -13,7 +13,7 @@ fs.mkdirSync(path.join(root, "out"), { recursive: true });
 await build({ entryPoints: [path.join(root, "test/isolated/shim-entry.js")], bundle: true, format: "esm", outfile: path.join(root, "out/shim-fb.js"), logLevel: "warning" });
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ff14iso-")); const pd = path.join(tmp, "diner"), pt = path.join(tmp, "toko"), mc = path.join(tmp, "mc.json");
 fs.writeFileSync(mc, JSON.stringify({ apiKey: "x", authDomain: "x", projectId: "pixies-diner", appId: "x" }));
-const sh = (args, opts = {}) => spawnSync(process.platform === "win32" ? "npx.cmd" : "npx", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32", ...opts });
+const sh = (args, opts = {}) => spawnSync(process.platform === "win32" ? "npx.cmd" : "npx", shellArgs(args), { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32", ...opts });
 for (const [sys, src, out, extra] of [["diner", dSrc, pd, []], ["toko", tSrc, pt, ["--master-config", mc]]]) {
   const r = spawnSync("node", ["store-patches/apply.mjs", "--system", sys, "--src", src, "--out", out, ...extra], { cwd: root, encoding: "utf8" });
   if (r.status !== 0) { console.error(`パッチ適用に失敗(${sys}): ${r.stderr}`); process.exit(r.status || 1); }

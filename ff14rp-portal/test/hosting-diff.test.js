@@ -23,3 +23,8 @@ test("hosting-diff: GETのみ・SAME/DIFFERENT/MISSING判定・SPAのhtml rewrit
   assert.deepEqual(st, { "index.html": "SAME", "app.js": "DIFFERENT", "logic.js": "REMOTE_MISSING" });
   assert.deepEqual([...methods], ["GET"]); assert.equal(r.status, 1);
 });
+test("hosting-diff: 通信失敗は不合格(終了コード1)、誤ってPASSにしない", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hd2-")); fs.writeFileSync(path.join(dir, "index.html"), "x");
+  const r = await new Promise(res => execFile("node", ["tools/hosting-diff.mjs", "--base", "http://127.0.0.1:1", "--local", dir, "--files", "index.html"], { encoding: "utf8" }, (err, stdout) => res({ stdout, status: err ? err.code : 0 })));
+  assert.equal(r.status, 1); assert.equal(JSON.parse(r.stdout).rows[0].status, "FETCH_FAILED");
+});

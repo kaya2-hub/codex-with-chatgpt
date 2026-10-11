@@ -26,9 +26,9 @@ for (const f of files) {
     const ct = r.headers.get("content-type") || "";
     if (r.ok && !(ct.includes("text/html") && f !== "index.html")) R = norm(Buffer.from(await r.arrayBuffer())); // SPA rewriteでhtmlが返る場合は「無い」扱い
   } catch (e) { status = `取得失敗: ${e.message}`; }
-  const s = status || (!L && !R ? "BOTH_MISSING" : !L ? "LOCAL_MISSING" : !R ? "REMOTE_MISSING" : sha(L) === sha(R) ? "SAME" : "DIFFERENT");
-  if (s === "DIFFERENT" || s === "LOCAL_MISSING" || s === "REMOTE_MISSING") different++;
-  rows.push({ file: f, status: s, local: L ? { sha: sha(L).slice(0, 12), bytes: L.length } : null, remote: R ? { sha: sha(R).slice(0, 12), bytes: R.length } : null });
+  const s = status ? "FETCH_FAILED" : (!L && !R ? "BOTH_MISSING" : !L ? "LOCAL_MISSING" : !R ? "REMOTE_MISSING" : sha(L) === sha(R) ? "SAME" : "DIFFERENT");
+  if (s !== "SAME") different++; // 取得失敗・両方欠落も「確認できていない」ので不合格(誤って合格にしない)
+  rows.push({ file: f, status: s, ...(status ? { error: status } : {}), local: L ? { sha: sha(L).slice(0, 12), bytes: L.length } : null, remote: R ? { sha: sha(R).slice(0, 12), bytes: R.length } : null });
 }
 console.log(JSON.stringify({ base, rows, differentCount: different, note: "DIFFERENT/MISSINGがある場合、保存版は現行と一致しません。移行・店舗側改修の前に現行ソースを入手してください。" }, null, 2));
 process.exit(different ? 1 : 0);

@@ -9,6 +9,7 @@ export function snapshotFromTypedDocs(docs) { // docs: Map(path -> typed fields)
   return snap;
 }
 export function snapshotFromPlainVisits(visits) { // visits: [{id, orderType, verCounted, ...}]
+  if (visits.some(v => !(v.id ?? v.visitId))) throw new Error("来店IDのない行があります(id または visitId が必要)");
   return Object.fromEntries(visits.map(v => [v.id ?? v.visitId, { orderType: v.orderType ?? "", verCounted: v.verCounted === true, verCountExclusion: v.verCountExclusion ?? "", verCountOverride: v.verCountOverride ?? "" }]));
 }
 export function summarize(snap) {

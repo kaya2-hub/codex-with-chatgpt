@@ -6,7 +6,7 @@
  * 判定: 与えた全ステップが合格なら "ALL_PASS"。未指定のステップは SKIPPED と明示し、1つでも SKIPPED/FAIL があれば ALL_PASS にならない。
  * 出力は件数・ID・判定のみ(氏名/備考/DMは出ません)。
  */
-import { spawnSync } from "node:child_process"; import fs from "node:fs"; import path from "node:path"; import os from "node:os"; import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process"; import fs from "node:fs"; import path from "node:path"; import os from "node:os"; import { fileURLToPath } from "node:url"; import { shellArgs } from "./proc.js";
 const a = process.argv.slice(2); const opt = n => { const i = a.indexOf("--" + n); return i >= 0 ? a[i + 1] : undefined; };
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."); const win = process.platform === "win32";
 const EXPECT = { diner: { docs: 821, cols: 3, ver: { counted: 186, notCountedWithReason: 449, overrideCounted: 6 } }, toko: { docs: 162, cols: 10 } };
@@ -20,10 +20,10 @@ function backupStep(key, dir) {
   const name = `backup:${key}`; if (!dir) return steps.push({ name, result: "SKIPPED", detail: "--" + key + "-backup 未指定" });
   const rep = path.join(tmp, `${key}.json`); const ver = path.join(tmp, `${key}-ver.json`); const proj = `demo-restore-${key}`;
   const env = { ...process.env, FF14_BACKUP_DIR: dir, FF14_RESTORE_PROJECT: proj, FF14_EXPECT_DOCS: String(EXPECT[key].docs), FF14_EXPECT_COLLECTIONS: String(EXPECT[key].cols), FF14_REPORT_OUT: rep, FF14_VER_OUT: ver };
-  const r = spawnSync(win ? "npx.cmd" : "npx", ["firebase", "emulators:exec", "--only", "firestore", "--project", proj, "node tools/backup-verify.mjs verify"], { cwd: root, env, encoding: "utf8", shell: win });
+  const r = spawnSync(win ? "npx.cmd" : "npx", shellArgs(["firebase", "emulators:exec", "--only", "firestore", "--project", proj, "node tools/backup-verify.mjs verify"]), { cwd: root, env, encoding: "utf8", shell: win });
   if (!fs.existsSync(rep)) return steps.push({ name, result: "FAIL", detail: `検証レポートが生成されませんでした(終了コード ${r.status})。形式不明なら probe を実行: ${(r.stderr || "").split("\n").filter(Boolean).slice(-2).join(" / ")}` });
   const j = JSON.parse(fs.readFileSync(rep, "utf8"));
-  steps.push({ name, result: j.verdict === "PASS" ? "PASS" : "FAIL", detail: { documents: j.documents, rootCollections: j.rootCollections, restoreMatched: j.restore?.matched, mismatched: j.restore?.mismatched, missing: j.restore?.missing, checksumBad: j.checksums?.bad?.length, duplicatePaths: j.duplicatePaths, sourceUnchanged: j.sourceUnchanged } });
+  steps.push({ name, result: j.verdict === "PASS" ? "PASS" : "FAIL", detail: { documents: j.documents, rootCollections: j.rootCollections, restoreMatched: j.restore?.matched, mismatched: j.restore?.mismatched, missing: j.restore?.missing, checksumsPresent: j.checksums?.present, checksumOk: j.checksums?.ok, checksumBad: j.checksums?.bad?.length, duplicatePaths: j.duplicatePaths, sourceUnchanged: j.sourceUnchanged } });
   if (key === "diner") {
     const v = j.verSummary; const e = EXPECT.diner.ver;
     const ok = v && v.counted === e.counted && v.notCountedWithReason === e.notCountedWithReason && v.overrideCounted === e.overrideCounted && v.countedNonVer === 0;

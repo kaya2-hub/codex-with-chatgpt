@@ -7,7 +7,7 @@ import { detectDrift } from "./drift.js";
  * diner: 全顧客が確定リンクを持つ / 共通と店舗側の備考・DMに未解決の差異が無い / リンク重複なし。
  * toko:  全プロフィールにSourceLinkがある。未確認(候補/保留)は従来の店舗内備考のまま動く(件数を警告表示)。
  */
-export function preflight({ persons, links, dinerCustomers, tokoProfiles }, system) {
+export function preflight({ persons, links, characters, dinerCustomers, tokoProfiles }, system) {
   const checks = [];
   const add = (id, label, ok, detail = "", blocking = true) => checks.push({ id, label, ok, detail, blocking });
   const byId = new Map(persons.map(p => [p.id, p]));
@@ -22,7 +22,12 @@ export function preflight({ persons, links, dinerCustomers, tokoProfiles }, syst
     else {
       const linked = new Set(mine.filter(l => l.linkStatus === "confirmed").map(l => l.sourceId));
       const missing = dinerCustomers.filter(c => !linked.has(c.id)).length;
+      add("not-empty", "ダイナー顧客が1件以上読み込めた", dinerCustomers.length > 0, dinerCustomers.length ? "" : "0件(読込異常の可能性)");
       add("all-linked", "全ダイナー顧客が確定リンク済み", missing === 0, missing ? `未連携 ${missing}件(総合DBの再スキャンで作成)` : `${dinerCustomers.length}件`);
+      const normN = v => String(v ?? "").normalize("NFKC").toLowerCase().replace(/[\s　]/g, "");
+      let nameDrift = 0;
+      for (const c of dinerCustomers) { const l = mine.find(x => x.sourceId === c.id && x.linkStatus === "confirmed"); const ch = l && (characters || []).find(x => x.id === l.characterId); if (ch && ![ch.currentName, ...ch.previousNames, ...ch.legacyNameCandidates].map(normN).includes(normN(c.customerName))) nameDrift++; }
+      add("no-name-drift", "ダイナー側の名前と共通のキャラ名に差異なし", nameDrift === 0, nameDrift ? `${nameDrift}件(「名前を改名として取り込む」で解消)` : "");
       let driftN = 0;
       for (const c of dinerCustomers) {
         const l = mine.find(x => x.sourceId === c.id && x.linkStatus === "confirmed"); const p = l && resolveP(l.personId); if (!p) continue;
@@ -35,6 +40,7 @@ export function preflight({ persons, links, dinerCustomers, tokoProfiles }, syst
     else {
       const have = new Set(mine.map(l => l.sourceId));
       const missing = tokoProfiles.filter(p => !have.has(p.id)).length;
+      add("not-empty", "常若亭プロフィールが1件以上読み込めた", tokoProfiles.length > 0, tokoProfiles.length ? "" : "0件(読込異常の可能性)");
       add("all-linked", "全常若亭プロフィールにSourceLinkあり", missing === 0, missing ? `未登録 ${missing}件(再スキャンで作成)` : `${tokoProfiles.length}件`);
       const unconfirmed = mine.filter(l => l.linkStatus !== "confirmed").length;
       add("unconfirmed", "未確認の照合候補(従来の店舗内備考のまま動作)", true, unconfirmed ? `${unconfirmed}件は確認するまで共通備考に接続されません` : "なし", false);

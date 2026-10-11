@@ -105,6 +105,36 @@ await step("[パッチ済み・master] 既存顧客への名前統合は止ま�
   assert.match(await s.page.innerText("#toast"), /人物の統合/);
   await s.close();
 });
+await step("[master経験後にoff] 店舗側の旧DMは凍結で古い: 連携版は過去Verの再判定(reconcile)をしない", async () => {
+  const { store } = await prepare("master");
+  await setCutover(store, "diner", "off", null, { label: "iso" });
+  const before = await visitFlags(db); const s = await session(patchedDir);
+  assert.equal(await s.page.locator("#ff14rp-master-badge").count(), 0);
+  await editInfo(s.page, "Test Alpha", { dm: "", note: "off後の編集" }); // 従来なら過去Verが一括false化される操作
+  assert.deepEqual(await visitFlags(db), before); await s.close();
+});
+await step("[master] 名前変更(統合でない): 共通のキャラ名を改名として更新し、備考は共通へ。店舗側の備考は凍結", async () => {
+  const { store } = await prepare("master"); const s = await session(patchedDir);
+  await pickCustomer(s.page, "Test Delta"); await s.page.fill("#existingCustomerName", "Test Delta2"); await s.page.fill("#customerNote", "改名時の備考");
+  await s.page.click("#saveCustomerOnly"); await settle(s.page);
+  const ch = await store.get(M.characters, "char-diner-cus_d"); assert.equal(ch.currentName, "Test Delta2"); assert.deepEqual(ch.previousNames, ["Test Delta"]);
+  assert.equal((await store.get(M.persons, "person-diner-cus_d")).customerNote, "改名時の備考");
+  const local = await localCustomer("cus_d"); assert.equal(local.customerName, "Test Delta2"); assert.equal(local.customerNote, ""); // 店舗側名は更新・備考は凍結のまま
+  await s.close();
+});
+await step("[master] 共通への保存に失敗しても店舗の記帳は止まらず、接続エラー状態にならない(通知のみ)", async () => {
+  const { store } = await prepare("master");
+  const l = await store.get(M.sourceLinks, "diner__pixiesCustomers__cus_e");
+  await store.batch([{ op: "update", col: M.sourceLinks, id: l.id ?? "diner__pixiesCustomers__cus_e", expectedRevision: l.revision, data: { linkStatus: "unresolved" } }]);
+  const s = await session(patchedDir);
+  await editInfo(s.page, "Same Name", { note: "保存できない備考" });
+  assert.match(await s.page.innerText("#toast"), /共通顧客マスターへ保存できなかった/); assert.equal(await s.page.locator("#setupError").isVisible(), false);
+  const n0 = (await F.getDocs(F.collection(db, "pixiesVisits"))).size;
+  await s.page.click("#changeCustomerButton").catch(() => {}); await pickCustomer(s.page, "Test Beta");
+  await s.page.locator("#orderTypes").getByText("Verセット").click(); await s.page.locator("#verFoodChoices").getByText("ポポトポタージュ").click(); await s.page.locator("#verDrinkChoices").getByText("D1").first().click();
+  await s.page.click("#submitLedger"); await settle(s.page);
+  assert.equal((await F.getDocs(F.collection(db, "pixiesVisits"))).size, n0 + 1); await s.close();
+});
 await step("外部通信ゼロ(許可: localhostと差し替え済みSDKのみ)", async () => { const bad = allBlocked.filter(u => /firestore|firebaseio|identitytoolkit|securetoken|googleapis\.com\/(v1|identitytoolkit)/.test(u)); assert.deepEqual(bad, [], "本番Firebase系への通信試行が遮断された"); console.log("   遮断した外部通信(件数/ホスト):", allBlocked.length, [...new Set(allBlocked.map(u => new URL(u).hostname))].join(",")); });
 await br.close();
 const fails = results.filter(r => r[0] === "FAIL").length; console.log(fails ? `ISOLATED FAIL ${fails}` : "ISOLATED 全PASS"); process.exit(fails ? 1 : 0);

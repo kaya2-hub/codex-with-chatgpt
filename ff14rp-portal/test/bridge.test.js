@@ -14,7 +14,7 @@ async function setup(system = "diner") {
   const { db, fs } = ctx.store.raw;
   const touched = new Set();
   const sdk = { ...fs, doc: (d, c, ...r) => { touched.add(c); return fs.doc(d, c, ...r); }, collection: (d, c) => { touched.add(c); return fs.collection(d, c); } };
-  const load = async () => ({ persons: await ctx.store.list(M.persons), links: await ctx.store.list(M.sourceLinks), dinerCustomers: ctx.shops.dinerCustomers, tokoProfiles: ctx.shops.tokoProfiles });
+  const load = async () => ({ persons: await ctx.store.list(M.persons), links: await ctx.store.list(M.sourceLinks), characters: await ctx.store.list(M.characters), dinerCustomers: ctx.shops.dinerCustomers, tokoProfiles: ctx.shops.tokoProfiles });
   return { ...ctx, db, sdk, touched, load, mk: () => createBridge({ db, sdk, system, label: "テスト画面" }) };
 }
 
@@ -93,4 +93,34 @@ test("master化(常若亭): 確定リンクの備考は共通へ、未確認(候
   assert.equal((await t.store.get(M.persons, "person-toko-profile-t2")).customerNote, "常若亭画面から\n2行目");
   assert.equal(b.overlayProfile({ id: "profile-t1", notes: "旧備考A" })._master, false); // 候補=未接続
   await assert.rejects(() => b.persistNote("profile-t1", "x"), e => e.code === "not-linked");
+});
+
+test("reconcile許可(reconcileAllowed): 未経験のoff=許可/master中=禁止/master経験後のoff=禁止/フラグ読込失敗=禁止(過去Ver保護)", opts, async () => {
+  const t = await setup();
+  let b = await t.mk(); assert.equal(b.reconcileAllowed, true); // フラグ無し=従来運用
+  await setCutover(t.store, "diner", "master", preflight(await t.load(), "diner"));
+  b = await t.mk(); assert.equal(b.active, true); assert.equal(b.reconcileAllowed, false);
+  await setCutover(t.store, "diner", "off", null);
+  b = await t.mk(); assert.equal(b.active, false); assert.equal(b.mode, "off"); assert.equal(b.reconcileAllowed, false); // master経験あり: 店舗側旧DMは凍結で古い
+  const broken = await createBridge({ db: t.db, sdk: { ...t.sdk, getDoc: async () => { throw new Error("offline"); } }, system: "diner" });
+  assert.equal(broken.active, false); assert.equal(broken.reconcileAllowed, false);
+});
+test("名前ガード: 同じ顧客IDでも共通側のキャラ名と違えば書かない(別人の可能性)/改名はsyncNameで旧名一致時のみ反映", opts, async () => {
+  const t = await setup();
+  await setCutover(t.store, "diner", "master", preflight(await t.load(), "diner"));
+  const b = await t.mk();
+  await assert.rejects(() => b.persistInfo({ customerId: "cus_a", customerName: "Somebody Else", customerNote: "上書きされてはいけない", xDmUrl: "" }), /一致しません/);
+  assert.equal((await t.store.get(M.persons, "person-diner-cus_a")).customerNote, "架空メモA");
+  await assert.rejects(() => b.syncName("cus_a", "Wrong Old", "Test Alpha 2"), /旧名/);
+  await b.syncName("cus_a", "Test Alpha", "Test Alpha 2");
+  const ch = await t.store.get(M.characters, "char-diner-cus_a"); assert.equal(ch.currentName, "Test Alpha 2"); assert.deepEqual(ch.previousNames, ["Test Alpha"]);
+  await b.persistInfo({ customerId: "cus_a", customerName: "Test Alpha 2", customerNote: "改名後の備考", xDmUrl: "https://x.example/dm/alpha" });
+  assert.equal((await t.store.get(M.persons, "person-diner-cus_a")).customerNote, "改名後の備考");
+  const chg = (await t.store.list(M.identityChanges)).find(c => c.kind === "renameCharacter"); await Op.undoChange(t.store, chg.id); // ポータルから取り消し可能(後続更新がなければ)
+});
+test("preflight: ダイナー名の差異/0件読込はmaster化を拒否", opts, async () => {
+  const t = await setup(); const ld = await t.load();
+  const renamed = { ...ld, dinerCustomers: ld.dinerCustomers.map(c => c.id === "cus_a" ? { ...c, customerName: "Renamed In Diner" } : c) };
+  const pre = preflight(renamed, "diner"); assert.equal(pre.ok, false); assert.ok(pre.checks.find(c => c.id === "no-name-drift" && !c.ok));
+  assert.equal(preflight({ ...ld, dinerCustomers: [] }, "diner").ok, false);
 });

@@ -58,7 +58,7 @@ try {
     let t = await page.innerText("#view"); assert.match(t, /全ダイナー顧客が確定リンク済み/); assert.match(t, /従来\(店舗内\)/);
     // 直前の編集で共通とダイナー店舗側に差異がある → 切替は拒否され、取り込みで解消してから可能になる
     assert.match(t, /差異/); assert.equal(await page.locator('[data-act="cutset"][data-sys="diner"][data-mode="master"]').isDisabled(), true);
-    await act("adopt"); await page.waitForFunction(() => document.body.innerText.includes("取り込みました"));
+    for (let i = 0; i < 4 && await page.locator('[data-act="adopt"]').count(); i++) { await page.locator('[data-act="adopt"]').first().click(); await page.waitForTimeout(700); }
     await page.waitForFunction(() => !document.querySelector('[data-act="adopt"]'));
     await page.click('[data-act="cutset"][data-sys="diner"][data-mode="master"]');
     await page.waitForFunction(() => document.body.innerText.includes("切替フラグを更新しました"));

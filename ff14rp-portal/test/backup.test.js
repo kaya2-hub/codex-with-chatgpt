@@ -97,3 +97,13 @@ test("SEC-02 リポジトリ検査: ff14rp-portal の作業ツリー/git履歴�
   const r = spawnSync("node", ["tools/secret-scan.mjs"], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stdout);
 });
+test("SEC-02(検出力) secret-scan: 擬似キー/実在形式のXユーザーURL/jsonl/未追跡ファイルを検出し、架空DMドメインは許可", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-")); const g = (...a) => spawnSync("git", a, { cwd: dir, encoding: "utf8" });
+  g("init", "-q"); g("config", "user.email", "t@example.com"); g("config", "user.name", "t");
+  fs.mkdirSync(path.join(dir, "ff14rp-portal")); const sub = path.join(dir, "ff14rp-portal");
+  const scan = () => spawnSync("node", [path.resolve("tools/secret-scan.mjs")], { cwd: sub, encoding: "utf8" });
+  fs.writeFileSync(path.join(sub, "ok.txt"), "https://x.example/dm/alpha and x.com/… placeholder"); g("add", "-A"); g("commit", "-qm", "ok"); assert.equal(scan().status, 0, scan().stdout);
+  fs.writeFileSync(path.join(sub, "k.txt"), "key=AIza" + "A".repeat(35)); assert.equal(scan().status, 1); fs.rmSync(path.join(sub, "k.txt"));
+  fs.writeFileSync(path.join(sub, "t.txt"), "https://x" + ".com/some_user_1"); assert.equal(scan().status, 1); fs.rmSync(path.join(sub, "t.txt"));
+  fs.writeFileSync(path.join(sub, "b.jsonl"), "{}"); assert.equal(scan().status, 1); // 未追跡でも検出
+});

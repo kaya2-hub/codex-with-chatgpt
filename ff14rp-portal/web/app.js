@@ -109,7 +109,7 @@ function vCandidates() {
 }
 
 // ---------- 切替(備考・DMの正本一本化) ----------
-function preInputs() { return { persons: S.d.persons, links: S.d.links, dinerCustomers: S.d.shop.diner?.customers ?? null, tokoProfiles: S.d.shop.toko?.profiles ?? null }; }
+function preInputs() { return { persons: S.d.persons, links: S.d.links, characters: S.d.characters, dinerCustomers: S.d.shop.diner?.customers ?? null, tokoProfiles: S.d.shop.toko?.profiles ?? null }; }
 function driftRows() {
   const out = []; const dc = S.d.shop.diner?.customers; if (!dc) return out;
   for (const c of dc) {
@@ -138,7 +138,7 @@ function vCutover() {
   <div class="card"><h3>店舗の新規客を共通マスターへ追加(再スキャン)</h3><p class="mut">移行後に店舗で増えた顧客/プロフィールだけを追加します(既存は上書きしません・同名は候補として追加され自動統合しません)。</p><button class="b" data-act="rescan">再スキャンを実行</button></div>
   <div class="card"><h3>ダイナー側と共通で違う項目(${rows.length}件)</h3>${rows.map(r => `<div class="row"><b>${h(r.ch?.currentName ?? r.c.customerName)}</b>
     ${r.fields.includes("customerNote") ? `<span class="tag warn">備考が違う</span>` : ""}${r.fields.includes("xDmUrl") ? `<span class="tag warn">DMが違う</span>` : ""}${r.nameDiff ? `<span class="tag warn">名前が違う(ダイナー: ${h(r.c.customerName)})</span>` : ""}
-    ${r.fields.length ? `<button class="b" data-act="adopt" data-c="${h(r.c.id)}" data-f="${r.fields.join(",")}" data-p="${h(r.p.id)}" data-rev="${r.p.revision}">ダイナー側の値を共通へ取り込む</button>` : ""}
+    ${r.fields.map(f => `<button class="b" data-act="adopt" data-c="${h(r.c.id)}" data-f="${f}" data-p="${h(r.p.id)}" data-rev="${r.p.revision}">${f === "xDmUrl" ? "DM" : "備考"}をダイナー側の値で共通へ取り込む${String(r.c[f] ?? "").trim() === "" ? "(共通が空になります)" : ""}</button>`).join("")}
     ${r.nameDiff ? `<button class="b" data-act="adoptname" data-ch="${h(r.ch.id)}" data-n="${h(r.c.customerName)}">名前を改名として取り込む</button>` : ""}</div>
     ${r.fields.length ? `<details><summary class="mut">値を比較</summary><table><tr><th></th><th>ダイナー店舗側</th><th>共通(現在)</th></tr>${r.fields.map(f => `<tr><td>${f === "xDmUrl" ? "DM" : "備考"}</td><td style="white-space:pre-wrap">${h(r.c[f])}</td><td style="white-space:pre-wrap">${h(r.p[f])}</td></tr>`).join("")}</table></details>` : ""}`).join("") || '<p class="mut">差異なし</p>'}
     <p class="mut">「共通を維持」の場合は何もしなくて構いません(店舗側の値は凍結され、切替後は共通の値が表示されます)が、切替前チェックは差異が残っている間は通りません。差異を残したまま切り替えたい場合は、先に取り込みで揃えてください。</p></div>
@@ -296,7 +296,7 @@ const ACTIONS = {
     const f = finalizeTimeline({ rows, unclassified: rest, sourceText: t.sourceText }, { acceptUnclassified: true });
     await setOcc(d.id, d.rev, { timeline: f.timeline }); S.tl = null;
   }, "タイムラインを保存しました"),
-  cutset: d => confirm(d.mode === "master" ? "共通マスターを正本にします(フラグのみの切替。店舗アプリが連携版でなければ従来のままです)。よろしいですか?" : "従来(店舗内)に戻します。よろしいですか?") && run(() => setCutover(S.boot.store, d.sys, d.mode, preflight(preInputs(), d.sys), L()), "切替フラグを更新しました"),
+  cutset: d => confirm(d.mode === "master" ? "共通マスターを正本にします(フラグのみの切替。店舗アプリが連携版でなければ従来のままです)。よろしいですか?" : "従来(店舗内)に戻します。よろしいですか?") && run(async () => { await refresh(); await setCutover(S.boot.store, d.sys, d.mode, preflight(preInputs(), d.sys), L()); }, "切替フラグを更新しました"),
   adopt: d => confirm("ダイナー店舗側の値を共通へ取り込みます(共通の現在値は上書きされます。履歴から取り消せます)。よろしいですか?") && run(() => adoptDinerInfo(S.boot.store, d.p, Number(d.rev), S.d.shop.diner.customers.find(x => x.id === d.c), d.f.split(","), L()), "取り込みました"),
   adoptname: d => confirm("ダイナー側の名前に改名として更新します(旧名は保持)。よろしいですか?") && run(() => adoptDinerName(S.boot.store, d.ch, d.n, L()), "改名として取り込みました"),
   applegacy: d => confirm("旧備考を共通備考の末尾へ追記します(元の旧備考は残ります)。よろしいですか?") && run(async () => { const p = S.d.persons.find(x => x.id === d.id); const prof = S.d.shop.toko.profiles.find(x => x.id === d.n); await appendLegacyTokoNote(S.boot.store, d.id, p.revision, prof.notes, L()); }, "追記しました"),

@@ -28,6 +28,9 @@ for (const f of ["collections.js", "identity-plan.js", "util.js"]) fs.copyFileSy
 if (system === "toko") {
   const mc = opt("master-config");
   const conf = mc ? JSON.parse(fs.readFileSync(mc, "utf8")) : null;
+  if (!conf && !a.includes("--allow-placeholder-master-config")) { console.error("常若亭連携版には --master-config <共通マスターのFirebase Web設定JSON> が必要です(placeholderのまま出力するには --allow-placeholder-master-config)"); process.exit(2); }
   fs.writeFileSync(path.join(out, "master-config.js"), `// 共通顧客マスター(rp*コレクション)を置くFirebaseプロジェクトのWeb設定(公開用設定。秘密鍵ではない)\nexport const masterFirebaseConfig = ${JSON.stringify(conf ?? { apiKey: "SET_ME", authDomain: "SET_ME", projectId: "SET_ME", appId: "SET_ME" }, null, 2)};\n`);
 }
+// 連携版の追加ファイルがブラウザキャッシュで古いまま残らないよう no-cache ヘッダを足す
+try { const fp = path.join(out, "firebase.json"); const fj = JSON.parse(fs.readFileSync(fp, "utf8")); fj.hosting.headers = [...(fj.hosting.headers || []), { source: "{bridge,core}/**", headers: [{ key: "Cache-Control", value: "no-cache, max-age=0, must-revalidate" }] }]; fs.writeFileSync(fp, JSON.stringify(fj, null, 2)); } catch { /* firebase.jsonが無ければ何もしない */ }
 console.log(JSON.stringify({ system, output: "(指定のout)", appliedEdits: applied, note: "元ソースは未変更。本番へはデプロイしていません。切替前にportalの『切替前チェック』を通すこと。" }, null, 2));

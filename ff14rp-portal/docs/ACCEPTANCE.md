@@ -1,39 +1,60 @@
 # 受入試験表(証拠付き)
 
-実行環境: Node 22 / Firestoreエミュレータ(`demo-ff14rp`, localhost) / Chromium。**すべて架空データ**。
-最新実行: `npm test` 39/39(emu専用1件skip)、`npm run test:emu` 40/40(失敗0・skip0)、`npm run test:e2e` 全PASS(11ステップ)。
-「実データ」列: 実顧客データでの確認が必要か。クラウドには実データが無いため **×=未検証**。
+環境: Node 22 / Firestoreエミュレータ(`demo-*`・localhost)/ Chromium。**全て架空データ**。実顧客データ・実バックアップはクラウドから見えないため、「実データ」列が **×** の項目は未検証。
+実行コマンド: `npm test`(メモリ+単体)、`npm run test:emu`(エミュレータ。結合・復元CLI・ブリッジ含む)、`npm run test:e2e`(ポータルUI)、`npm run test:isolated`(**保存版の店舗アプリ原本/連携版を実ブラウザで操作**。要 `FF14RP_DINER_SRC` `FF14RP_TOKO_SRC`)、`npm run scan`(機密混入検査)。最新結果は `FINAL_REPORT.md`。
 
-| ID | 判定 | 証拠(テスト) | 実データ | 備考 |
-|---|---|---|---|---|
-| DATA-01 元ID保持 | PASS | migration.test「元IDを保持…」 | × | ダイナーIDをそのまま`person-diner-<id>`に使用 |
-| DATA-02 名寄せ候補 | PASS | migration「同名は候補のみ」(推測マージ0・曖昧列挙) | × | 16組は実データで要確認 |
-| DATA-03 別キャラ | PASS | identity「別キャラ追加…二重加算しない」 | × | |
-| DATA-04 改名 | PASS | identity「改名…undo」/ e2e HOME旧名検索 | × | |
-| DATA-05 同名別人 | PASS | identity「同名別人はreject…」 | × | |
-| DATA-06 characterId:null | PASS | migration「旧名は…characterIdはnull可」 | × | 履歴閲覧は候補確定後に表示 |
-| DATA-07 統合訂正 | PASS | identity「統合とundo」「undoは後続更新があれば競合」「splitCharacter」 | × | |
-| DATA-08 SourceLink冪等 | PASS | migration「適用は冪等…」(エミュレータでも) | × | |
-| DATA-09 競合編集 | PASS | identity「競合編集」(Firestoreトランザクションで確認) | | |
-| VER-01 基準186件のフラグ不変 | PARTIAL | 計画は凍結入力で実行、ポータルは店舗に書かない(コード境界テスト) | × | 実データ186件の前後比較は未実施 |
-| VER-02 DM変更でVer不変 | PASS | identity「VER-02/03」 | | 店舗データに書かない構造 |
-| VER-03 来店とVerを別表示 | PASS | identity「VER-02/03」+e2e | | |
-| VER-04 未確認実施の自動推測なし | PASS | ceremony状態は実施記録のみから導出 | | |
-| SHOP-01/02 店舗原操作の回帰 | N/A | 店舗アプリは無改変 | × | 店舗画面切替を行う段階で必要 |
-| SHOP-03 元履歴の原文保持 | PASS | events-ceremony「横断履歴…原文のまま」 | × | |
-| SHOP-04 最後の来店削除 | PASS(ポータル側) | identity「SHOP-04」 | × | 店舗側の削除経路は無改変(R4) |
-| SHOP-05 メニュー差異 | PASS | ポータルはメニューに触れない | × | 7件は実データ側 |
-| EVT-01 開催状況 | PASS | events「EVT-01〜03」+e2e | | |
-| EVT-02 過去スナップショット | PASS | 同上 | | |
-| EVT-03 複製 | PASS | 同上+e2e/archive | | |
-| EVT-04 3列タイムライン | PASS | events「EVT-04」+e2e | | ルールベース。AI/外部API不使用(費用なし) |
-| MAC-01 マクロ原文 | PASS | events「MAC-01」+e2eのクリップボード一致 | | |
-| MAC-02 完成状態の区別 | PASS | events「CER 持ち越し…MAC-02」+e2e | | GG本文は未取得(貼り付け登録) |
-| CER-01 7スタンプ | PASS | events「CER-01」 | × | 単位7は仮設定 |
-| CER-02 同日複数 | PASS | events「CER-02/03」 | | |
-| CER-03 実施記録 | PASS | 同上+e2e | | |
-| SEC-01 認証/ルール不変 | PASS | リポジトリ差分にrules/auth変更なし。匿名ログイン踏襲 | | ガード: backup.test「SEC-01」 |
-| SEC-02 機密非混入 | PASS | 架空データのみ。`AIza`/実DM/備考のgrep 0。ZIP・ソース未コミット | | |
-| ROL-01 隔離復元 | **PARTIAL** | 合成バックアップ(全型)で復元→全件一致、改ざん・形式不明・本番ID拒否を検証 | **×** | 実983件は未検証。手順A |
-| UI: スマホ | PASS | e2e 390px横スクロール0、`out/mobile-home.png` | | |
-| UI: 失敗時入力保持 | PASS | e2e 編集ステップ | | |
+凡例: PASS=自動テストで合格 / PASS* =合格だが実データ確認が別途必要 / PC=PC環境での実行が必要 / USER=利用者判断が必要 / HOLD=本番切替まで保留
+
+## 共通顧客・集計
+| ID | 判定 | 証拠 |
+|---|---|---|
+| DATA-01 元ID保持 | PASS* | migration「元IDを保持」 |
+| DATA-02 同名は候補のみ(推測マージ0・曖昧は全候補列挙) | PASS* | migration「同名は候補のみ」、e2e候補画面(判断材料表示) |
+| DATA-03 別キャラで二重加算なし | PASS | identity |
+| DATA-04 改名・旧名検索 | PASS | identity/e2e |
+| DATA-05 同名別人 | PASS | identity(reject)、bridge(名前ガード) |
+| DATA-06 characterId:null | PASS | migration |
+| DATA-07 統合訂正(undo)・孤児防止 | PASS | identity、audit-fixes |
+| DATA-08 SourceLink冪等・rollback参照保護 | PASS | migration、audit-fixes |
+| DATA-09 競合編集 | PASS | identity(Firestoreトランザクションでも) |
+| VER-01 Ver基準の**来店ID単位**比較 | PASS(ツール)/ PC(実186件) | ver-notion(入替・理由・上書き・欠落を検出)、`ver-compare`、`pc-gate-check`のbaseline(186/449/6) |
+| VER-02 DM変更で過去Ver不変 | PASS | identity、**isolated(実アプリ操作)**: master時にDMを空にしても全来店IDのflagsが一致 |
+| VER-03 来店とVerは別表示 | PASS | identity、e2e |
+| VER-04 実施の自動推測なし | PASS | ceremonyは実施記録のみから導出 |
+| 現在のDM有無による過去Ver再判定の停止 | PASS | **isolated**: 原本は14件が一括false化(危険の再現)→連携版master/off復帰後は不変。詳細は `CUTOVER_DESIGN.md` |
+| SHOP-03 元履歴の原文 | PASS* | events-ceremony |
+| SHOP-04 最後の来店削除で共通情報が残る | PASS | identity(+連携版の警告文) |
+
+## 備考・DMの正本一本化(今回の主要追加)
+| ID | 判定 | 証拠 |
+|---|---|---|
+| SOT-01 フラグoff/無し/読込失敗は従来動作 | PASS | bridge.test、isolated(連携版off=原本と同じ件数が変化) |
+| SOT-02 master時の備考/DMは共通Personへ・店舗旧フィールド凍結(削除/上書きなし) | PASS | isolated diner/toko |
+| SOT-03 切替前の既存値を失わない(差異検出→取り込み/旧備考は参照専用で併記・明示追記) | PASS | bridge.test(preflight)、ver-notion(adopt/append)、isolated toko(旧備考表示)、e2e(切替) |
+| SOT-04 切替前チェック(未連携・孤児・重複・値差・名前差・0件)を満たさないとmaster化不可 | PASS | bridge.test、e2e |
+| SOT-05 名前一致だけで統合しない(新規客は独立Person・既存同IDでも名前不一致は拒否・ダイナー内の既存顧客統合はmasterで停止・常若亭候補は未接続のまま) | PASS | bridge.test、isolated diner/toko |
+| SOT-06 店舗の注文・記帳機能が動く | PASS(架空データ) | isolated: Ver記帳(1件追加・既存flags不変)、連携失敗時も記帳継続 |
+| SOT-07 既存文書を自動削除しない | PASS | rollback/適用は上書きなし、連携版は旧フィールドを書かない |
+| SOT-08 本番への実適用 | HOLD | 連携版デプロイ・フラグmaster化は承認後。`CUTOVER_DESIGN.md` 手順 |
+| SOT-09 実ブラウザ+実Firebase匿名認証・2プロジェクト接続(常若亭→pixies-diner) | PC/USER | 未検証(shim経由のみ) |
+
+## イベント・セレモニー・マクロ
+| ID | 判定 | 証拠 |
+|---|---|---|
+| EVT-01/02/03/04 | PASS | events、e2e |
+| MAC-01 FF14マクロ原文(`/yell` `/s` `/wait` `<t>`・改行・記号)保持 | PASS | events、e2e(クリップボード一致)、notion-paste(本文不変) |
+| MAC-02 演目の完成状態の区別(GG=完成だが本文未取得/魔物・ダーツ=進行案) | PASS | events、e2e |
+| MAC-03 原文の登録・編集(GGテンプレ登録/差替、Notion貼り付け取り込み) | PASS | e2e、notion-paste。**Notion自動取り込みは未実装**(制約: `RISKS` R9) |
+| CER-01 7スタンプ(**確定仕様**)・到達と実施は別 | PASS | events、ceremony導出 |
+| CER-02 同営業回の抽選・CER-03 実施記録の一意/コピーで完了しない | PASS | events、audit-fixes、e2e |
+
+## 安全・運用
+| ID | 判定 | 証拠 |
+|---|---|---|
+| SEC-01 認証/ルール不変・本番書込み経路なし | PASS | 差分にrules/auth変更なし。ツールはdemo-/localhost限定、isolatedは外部通信遮断(遮断0件) |
+| SEC-02 機密・顧客データ・バックアップがリポジトリに無い | PASS | `npm run scan`(作業ツリー+未追跡+履歴。検出力テスト付き)。**公開範囲は未確認**(GitHub検索0件=非公開または未索引) |
+| ROL-01 バックアップ983件の隔離復元 | PC | ツール・合成バックアップでの全型一致は検証済。実データは `pc-gate-check` で判定 |
+| Gate1 現行Hosting差分 | PC | `hosting-diff`(GETのみ・通信失敗は不合格)。このクラウドは外部通信403 |
+| 16組の本人確認 | USER | 画面を完成(判断材料: 来店数/最終来店/旧名/備考DMの有無)。確定は利用者のみ |
+| PowerShell 5.1 互換 | PASS(静的)/ PC(実行) | BOM+CRLF・5.1非互換構文なし・`npx.cmd`。Windowsでの実行は未検証 |
+| Windows引数引用 | PASS(単体) | shellArgs。Windows実行は未検証 |

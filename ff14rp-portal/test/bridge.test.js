@@ -56,7 +56,7 @@ test("一括取込(persistInfoMany)は空で既存DM/備考を消さない・不
   const t = await setup();
   await setCutover(t.store, "diner", "master", preflight(await t.load(), "diner"));
   const b = await t.mk();
-  await b.persistInfoMany([{ customerId: "cus_a", customerName: "x", xDmUrl: "", customerNote: "" }]);
+  await b.persistInfoMany([{ customerId: "cus_a", customerName: "Test Alpha", xDmUrl: "", customerNote: "" }]);
   const p = await t.store.get(M.persons, "person-diner-cus_a"); assert.ok(p.xDmUrl); assert.equal(p.customerNote, "架空メモA");
   await assert.rejects(() => b.persistInfo({ customerId: "cus_a", customerName: "x", xDmUrl: "javascript:1", customerNote: "" }), /http/);
 });

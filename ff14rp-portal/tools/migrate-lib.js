@@ -45,13 +45,27 @@ export async function postCheck(store, plan) {
   return errs;
 }
 
-/** ロールバック: 当該バッチが作成し、その後一度も更新(revision>1)されていない文書だけ削除。編集済みは残して報告。 */
+/** ロールバック: 当該バッチが作成し未編集(revision==1)で、かつ他の(残る)文書から参照されていない文書だけ削除。参照されるものは残して報告。 */
 export async function rollbackBatch(store, batchId) {
-  const out = { deleted: 0, keptEdited: [] }; const ops = [];
-  for (const [, col] of PLAN_COLLECTIONS) for (const d of await store.list(col)) {
+  const out = { deleted: 0, keptEdited: [], keptReferenced: [] };
+  const all = {}; for (const [key, col] of PLAN_COLLECTIONS) all[key] = await store.list(col);
+  const cand = new Set(); const mine = {};
+  for (const [key, col] of PLAN_COLLECTIONS) for (const d of all[key]) {
     if (d.migrationBatchId !== batchId) continue;
-    if (d.revision === 1) ops.push({ op: "delete", col, id: d.id, expectedRevision: 1 }); else out.keptEdited.push(`${col}/${d.id}`);
+    if (d.revision === 1) cand.add(`${col}/${d.id}`); else out.keptEdited.push(`${col}/${d.id}`);
   }
+  // 残る文書(候補外)が参照する Person/Character は候補から外す。固定点まで繰り返す
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const keep = [...all.characters, ...all.sourceLinks].filter(d => !cand.has(`${PLAN_COLLECTIONS.find(([k]) => all[k].includes(d))[1]}/${d.id}`));
+    for (const d of keep) for (const ref of [d.personId && `${M.persons}/${d.personId}`, d.characterId && `${M.characters}/${d.characterId}`, ...(d.candidatePersonIds || []).map(x => `${M.persons}/${x}`)]) {
+      if (ref && cand.has(ref)) { cand.delete(ref); out.keptReferenced.push(ref); changed = true; }
+    }
+  }
+  const ops = [...cand].map(k => { const [col, ...r] = k.split("/"); return { op: "delete", col, id: r.join("/"), expectedRevision: 1 }; });
+  // 参照元(SourceLink/Character)→Person の順で削除
+  ops.sort((a, b) => (a.col === M.persons) - (b.col === M.persons));
   for (let i = 0; i < ops.length; i += 100) await store.batch(ops.slice(i, i + 100));
   out.deleted = ops.length; return out;
 }

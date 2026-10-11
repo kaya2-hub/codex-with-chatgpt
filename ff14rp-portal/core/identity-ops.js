@@ -154,10 +154,14 @@ export async function mergePersons(store, fromId, intoId, { label, reason } = {}
 export async function splitCharacter(store, characterId, { label, reason } = {}) {
   const b = new ChangeBuilder(store);
   const c = await b.load(M.characters, characterId);
+  const oldPerson = await b.load(M.persons, c.personId);
+  // セレモニー実施記録は人物単位。分離すると達成が再実施可能になるため、記録がある人物は分離しない。
+  if ((await store.list(M.ceremonyRecords)).some(r => r.personId === c.personId)) throw new PortalError("has-ceremony-records", "セレモニーの実施記録がある人物は分離できません(記録の扱いを決めてから実施してください)");
   const links = (await store.list(M.sourceLinks)).filter(l => l.characterId === characterId);
   const pid = newId("person");
   b.create(M.persons, pid, { primaryCharacterId: characterId, customerNote: "", xDmUrl: "", origin: "operator", createdAt: nowIso(), createdBy: "operator" });
   b.update(M.characters, characterId, { personId: pid });
+  if (oldPerson.primaryCharacterId === characterId) { const other = (await store.list(M.characters)).find(x => x.personId === c.personId && x.id !== characterId); b.update(M.persons, c.personId, { primaryCharacterId: other ? other.id : null }); }
   for (const l of links) { await b.load(M.sourceLinks, l.id); b.update(M.sourceLinks, l.id, { personId: pid }); }
   await b.commit("splitCharacter", label, reason);
   return pid;
@@ -170,6 +174,7 @@ export async function undoChange(store, changeId, { label } = {}) {
   if (ch.undone) throw new PortalError("already-undone", "取り消し済みです");
   const ops = [];
   const cur = new Map();
+  await assertUndoLeavesNoOrphans(store, ch);
   for (const d of [...ch.diffs].reverse()) {
     const doc = await store.get(d.col, d.id);
     if (!doc || doc.revision !== d.revisionAfter && !(d.type === "create" && doc?.revision === 1)) {
@@ -182,6 +187,22 @@ export async function undoChange(store, changeId, { label } = {}) {
   ops.push({ op: "update", col: M.identityChanges, id: changeId, data: { undone: true, undoneBy: clean(label) }, expectedRevision: ch.revision });
   await store.batch(ops);
   return changeId;
+}
+
+/** undo後の状態を仮想的に作り、削除される Person/Character を指す参照が残るなら拒否(孤児防止)。 */
+async function assertUndoLeavesNoOrphans(store, ch) {
+  const creates = ch.diffs.filter(d => d.type === "create" && [M.persons, M.characters].includes(d.col));
+  if (!creates.length) return;
+  const gone = new Set(ch.diffs.filter(d => d.type === "create").map(d => `${d.col}/${d.id}`));
+  const patched = new Map(ch.diffs.filter(d => d.type === "update").map(d => [`${d.col}/${d.id}`, d.before]));
+  const view = async col => (await store.list(col)).filter(x => !gone.has(`${col}/${x.id}`)).map(x => ({ ...x, ...(patched.get(`${col}/${x.id}`) || {}) }));
+  const chars = await view(M.characters), links = await view(M.sourceLinks);
+  for (const d of creates) {
+    const refs = d.col === M.persons
+      ? [...chars.filter(c => c.personId === d.id), ...links.filter(l => l.personId === d.id)]
+      : links.filter(l => l.characterId === d.id);
+    if (refs.length) throw new PortalError("conflict", `後から追加された内容が参照しているため取り消せません: ${d.col}/${d.id}`);
+  }
 }
 
 export { personIdFor, characterIdFor, linkId };

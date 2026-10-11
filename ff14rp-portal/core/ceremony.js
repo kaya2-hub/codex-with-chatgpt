@@ -10,9 +10,13 @@ export const ACTS = Object.freeze({
 export const achievementKey = (personId, stampValue) => `${personId}__${stampValue}`;
 
 /** 人物別の状態を導出。実施記録(done)があれば実施済み、無ければ到達済み未実施。コピー等では変わらない。 */
-export function ceremonyStatus({ personId, verStamps }, records, unit = STAMP_UNIT) {
-  const doneKeys = new Set(records.filter(r => r.status === "done").map(r => r.achievementKey));
-  const carried = new Map(records.filter(r => r.status === "carried").map(r => [r.achievementKey, r]));
+// aliasIds: 統合元の人物ID。統合元の実施記録も同じ達成として扱い、再実施を防ぐ(保守側)。
+export function ceremonyStatus({ personId, verStamps, aliasIds = [] }, records, unit = STAMP_UNIT) {
+  const ids = new Set([personId, ...aliasIds]);
+  const keyOf = r => achievementKey(personId, r.stampValue);
+  const mine = records.filter(r => ids.has(r.personId));
+  const doneKeys = new Set(mine.filter(r => r.status === "done").map(keyOf));
+  const carried = new Map(mine.filter(r => r.status === "carried").map(r => [keyOf(r), r]));
   return ceremonyUnits(verStamps, unit).map(v => {
     const key = achievementKey(personId, v);
     return { achievementKey: key, stampValue: v, status: doneKeys.has(key) ? "done" : carried.has(key) ? "carried" : "reached_pending" };
@@ -27,7 +31,8 @@ export async function recordDraw(store, { storeId, businessDate, act, personId, 
   const id = `${safeId(storeId)}__${businessDate}`;
   const cur = await store.get(M.ceremonyDraws, id);
   if (cur) return { decided: false, draw: { id, ...cur } };
-  await store.batch([{ op: "create", col: M.ceremonyDraws, id, data: { storeId, businessDate, act, decidedFor: personId, decidedBy: clean(label), at: nowIso() } }]);
+  try { await store.batch([{ op: "create", col: M.ceremonyDraws, id, data: { storeId, businessDate, act, decidedFor: personId, decidedBy: clean(label), at: nowIso() } }]); }
+  catch (e) { if (e.code === "already-exists") return { decided: false, draw: { id, ...(await store.get(M.ceremonyDraws, id)) } }; throw e; }
   return { decided: true, draw: { id, storeId, businessDate, act, decidedFor: personId } };
 }
 export async function actForTarget(store, storeId, businessDate) {
@@ -45,4 +50,13 @@ export async function recordPerformance(store, { personId, characterId, stampVal
   if (existingDone) throw new PortalError("duplicate", "この達成は既に実施記録があります", { achievementKey: key });
   await store.batch([{ op: "create", col: M.ceremonyRecords, id, data: { achievementKey: key, personId, characterId: characterId ?? null, stampValue, storeId, businessDate, act, drawId: drawId ?? null, status, note: clean(note), recordedBy: clean(label), at: nowIso(), actStateAtRecord: ACTS[act].state } }]);
   return id;
+}
+
+/** 誤入力したダーツ結果の取り消し。その営業回に実施/持越の記録が既にあれば拒否。 */
+export async function clearDraw(store, { storeId, businessDate }) {
+  const id = `${safeId(storeId)}__${businessDate}`;
+  const d = await store.get(M.ceremonyDraws, id);
+  if (!d) throw new PortalError("not-found", "ダーツ結果がありません");
+  if ((await store.list(M.ceremonyRecords)).some(r => r.storeId === storeId && r.businessDate === businessDate)) throw new PortalError("has-records", "この営業回には既に実施/持越の記録があるため取り消せません");
+  await store.batch([{ op: "delete", col: M.ceremonyDraws, id, expectedRevision: d.revision }]);
 }

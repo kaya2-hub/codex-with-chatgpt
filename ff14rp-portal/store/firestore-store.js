@@ -5,6 +5,7 @@ import { MASTER_COLLECTIONS, PRODUCTION_PROJECT_IDS } from "../core/collections.
 // sdk = { doc, getDoc, getDocs, collection, runTransaction }
 export class FirestoreStore {
   constructor(db, sdk, { projectId, allowProductionMaster = false } = {}) {
+    if (!projectId) throw new PortalError("project-required", "projectIdが必要です");
     if (PRODUCTION_PROJECT_IDS.includes(projectId) && !allowProductionMaster) {
       throw new PortalError("production-blocked", "本番プロジェクトへのマスター書込は明示許可(allowProductionMaster)が必要です");
     }

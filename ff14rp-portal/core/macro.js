@@ -5,7 +5,8 @@ export const FF14_LINE_LIMIT = 15; // 目安。超えても自動で削除/切�
 export function renderMacro(template, vars) {
   const missing = new Set();
   const text = String(template).replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (m, k) => {
-    if (Object.prototype.hasOwnProperty.call(vars, k) && vars[k] !== undefined && vars[k] !== null && vars[k] !== "") return String(vars[k]);
+    // 空文字は「入力済み(空)」として置換する。undefined/null だけが未定義(置換せず報告)
+    if (Object.prototype.hasOwnProperty.call(vars, k) && vars[k] !== undefined && vars[k] !== null) return String(vars[k]);
     missing.add(k); return m;
   });
   return { text, missing: [...missing] };

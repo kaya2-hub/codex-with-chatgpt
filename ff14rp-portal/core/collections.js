@@ -9,6 +9,7 @@ export const MASTER = Object.freeze({
   ceremonyRecords: "rpCeremonyRecords",
   ceremonyDraws: "rpCeremonyDraws",
   ceremonyTemplates: "rpCeremonyTemplates",
+  ceremonyScripts: "rpCeremonyScripts",
   migrationBatches: "rpMigrationBatches"
 });
 export const MASTER_COLLECTIONS = Object.freeze(Object.values(MASTER));

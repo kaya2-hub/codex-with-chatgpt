@@ -25,3 +25,13 @@ export class PortalError extends Error {
 }
 // Firestore文書IDに使えない'/'を除去
 export const safeId = s => String(s).replace(/[\/\s]/g, "_");
+
+// 変更検出用の非暗号ハッシュ(cyrb53)。同時編集の3者比較(_base)に使う。
+export function hash53(str, seed = 0) {
+  let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
+  for (let i = 0, ch; i < str.length; i++) { ch = str.charCodeAt(i); h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677); }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+export const hashOf = v => hash53(stable(v));

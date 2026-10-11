@@ -5,7 +5,6 @@ import * as Ev from "../core/events.js";
 import * as Ce from "../core/ceremony.js";
 import { ceremonyUnits } from "../core/aggregate.js";
 import { renderMacro, analyzeMacro, copyText, macroVariables } from "../core/macro.js";
-import { parseTimeline, finalizeTimeline } from "../core/timeline.js";
 import { MASTER as M } from "../core/collections.js";
 
 const GG = "/yell 今日の主役は <t>さん！\n/s  ⚑ 特殊記号　全角スペース ♡\n\n/wait 3\n/s {{customer_name}}さん {{stamp_count}}スタンプ達成！\n";
@@ -23,18 +22,6 @@ test("マクロ15行超は警告のみで切り詰めない", () => {
   const long = Array.from({ length: 20 }, (_, i) => `/s l${i}`).join("\n");
   const a = analyzeMacro(long); assert.equal(a.warnings.length, 1);
   assert.equal(copyText(long), long);
-});
-test("EVT-04 自由文→3列: 抽出・未分類保持・推測しない", () => {
-  const text = "■オープニング\nKaya: 乾杯の挨拶\n[00:30]\nToushin: 照明を落とす\n共通: 全員着席後\nKaya｜合図あり｜Toushin返答\n謎の行\n";
-  const t = parseTimeline(text);
-  assert.equal(t.rows.length, 5);
-  assert.equal(t.rows[0].phase, "オープニング"); assert.equal(t.rows[0].kaya, "乾杯の挨拶");
-  assert.equal(t.rows[1].cue, "00:30"); assert.equal(t.rows[2].toushin, "照明を落とす");
-  assert.equal(t.rows[4].cue, "合図あり");
-  assert.deepEqual(t.unclassified.map(u => u.text), ["謎の行"]);
-  assert.equal(t.sourceText, text);
-  assert.equal(finalizeTimeline(t).ok, false);
-  assert.equal(finalizeTimeline(t, { acceptUnclassified: true }).ok, true);
 });
 test("EVT-01〜03 開催状況・スナップショット・複製", async () => {
   const store = await freshStore();

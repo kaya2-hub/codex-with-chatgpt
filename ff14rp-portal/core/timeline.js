@@ -1,31 +1,19 @@
-// 自由文 → Kaya｜タイミング・合図・共通条件｜Toushin の3列プレビュー。
-// ルールベース。分類できない行は unclassified に残し、担当・時刻・セリフを推測で補わない。
-const KAYA = /^(?:kaya|カヤ|かや)\s*[:：]\s*/i;
-const TOUSHIN = /^(?:toushin|トウシン|とうしん)\s*[:：]\s*/i;
-const CUE = /^(?:共通|合図|タイミング|条件|cue)\s*[:：]\s*/i;
-const TIME = /^\s*[\[［(（]?(\d{1,2}:\d{2}(?::\d{2})?)[\]］)）]?\s*/;
-const PHASE = /^(?:[■▼◆●]\s*|#{1,3}\s+|【(.+?)】\s*$)/;
+// 進行タイムライン v2。1つのステップ(時刻)に、かや/トーシンの複数の行動・セリフと共通の合図・条件を持てる。
+// 時刻は「22:55頃」「23時になったら」など原文の表現のまま保持する(正規化・補完しない)。
+export const ITEM_TYPES = Object.freeze(["say", "action", "change", "condition", "intent", "text"]);
+export const TYPE_JA = Object.freeze({ say: "セリフ", action: "動作", change: "キャラチェンジ", condition: "進行条件", intent: "演出意図", text: "未分類" });
+export const COLUMNS = Object.freeze(["kaya", "cue", "toushin"]);
+export const emptyTimeline = () => ({ version: 2, steps: [] });
+export const isV2 = t => !!t && t.version === 2 && Array.isArray(t.steps);
 
-export function parseTimeline(text) {
-  const rows = []; const unclassified = []; let phase = "";
-  const raw = String(text ?? "");
-  raw.split(/\r?\n/).forEach((line, i) => {
-    const t = line.trim(); if (!t) return;
-    // 3列形式: A｜B｜C または A|B|C
-    const cols = t.split(/[｜|]/);
-    if (cols.length === 3) { rows.push({ phase, kaya: cols[0].trim(), cue: cols[1].trim(), toushin: cols[2].trim(), line: i + 1, source: "table", uncertain: false }); return; }
-    if (PHASE.test(t) && !KAYA.test(t) && !TOUSHIN.test(t)) { phase = t.replace(/^(?:[■▼◆●]\s*|#{1,3}\s+)/, "").replace(/^【(.+?)】\s*$/, "$1"); return; }
-    let m;
-    if ((m = t.match(KAYA))) rows.push({ phase, kaya: t.replace(KAYA, ""), cue: "", toushin: "", line: i + 1, source: "label", uncertain: false });
-    else if ((m = t.match(TOUSHIN))) rows.push({ phase, kaya: "", cue: "", toushin: t.replace(TOUSHIN, ""), line: i + 1, source: "label", uncertain: false });
-    else if ((m = t.match(CUE))) rows.push({ phase, kaya: "", cue: t.replace(CUE, ""), toushin: "", line: i + 1, source: "label", uncertain: false });
-    else if ((m = t.match(TIME)) && t.replace(TIME, "").trim() === "") rows.push({ phase, kaya: "", cue: m[1], toushin: "", line: i + 1, source: "time", uncertain: false });
-    else unclassified.push({ line: i + 1, text: t, phase });
-  });
-  return { rows, unclassified, sourceText: raw };
+/** 旧形式(ルールベース3列: rows/unclassified)を新形式へ変換。内容は一切捨てない(種別不明は「未分類」)。 */
+export function upgradeTimeline(t) {
+  if (isV2(t)) return t;
+  if (!t || typeof t !== "object") return emptyTimeline();
+  const one = (type, text) => (String(text ?? "") === "" ? [] : [{ type, text: String(text) }]);
+  const steps = [];
+  (t.rows || []).forEach((r, i) => steps.push({ id: `legacy-s-${i}`, time: "", phase: r.phase || "", cue: one("text", r.cue), kaya: one("text", r.kaya), toushin: one("text", r.toushin), note: "" }));
+  (t.unclassified || []).forEach((u, i) => steps.push({ id: `legacy-u-${i}`, time: "", phase: u.phase || "", cue: one("text", u.text), kaya: [], toushin: [], note: "旧・未分類の行" }));
+  return { version: 2, steps };
 }
-/** 確定前の編集結果を保存形式へ。未分類が残っていれば保存を許可するが明示フラグを持つ。 */
-export function finalizeTimeline(parsed, { acceptUnclassified = false } = {}) {
-  if (parsed.unclassified.length && !acceptUnclassified) return { ok: false, reason: `未分類 ${parsed.unclassified.length}行があります。行を割り当てるか「未分類のまま保存」を選んでください` };
-  return { ok: true, timeline: { rows: parsed.rows, unclassified: parsed.unclassified, sourceText: parsed.sourceText } };
-}
+export const newStep = id => ({ id, time: "", phase: "", cue: [], kaya: [], toushin: [], note: "" });

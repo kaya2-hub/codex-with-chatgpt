@@ -23,6 +23,9 @@ async function bootDemo() {
     diner: new MemoryShopSource({ pixiesVisits: shops.dinerVisits, pixiesCustomers: shops.dinerCustomers }, "diner"),
     toko: new MemoryShopSource({ customerVisits: shops.tokoVisits, customers: shops.tokoSessionCustomers, items: shops.tokoItems, customerProfiles: shops.tokoProfiles }, "toko")
   };
+  // デモ専用: ?fail=diner|toko で店舗データの読込失敗を再現(表示が「0回」にならないことの確認用)
+  const fail = typeof location !== "undefined" ? new URLSearchParams(location.search).get("fail") : null;
+  if (fail === "diner") src.diner.failing.add("pixiesVisits"); if (fail === "toko") src.toko.failing.add("customerVisits");
   return { mode: "demo", store, src, links: { diner: "#", toko: "#" }, banner: "デモモード: 架空データ(メモリ上のみ。保存されません)", masterOrigin: "memory" };
 }
 
@@ -43,14 +46,14 @@ const tryList = async (src, name) => { try { return await src.list(name); } catc
 
 export async function loadAll(boot) {
   const { store, src } = boot;
-  const [persons, characters, links, occs, masters, records, draws, changes, templates] = await Promise.all([
+  const [persons, characters, links, occs, masters, records, draws, changes, templates, scripts] = await Promise.all([
     store.list(M.persons), store.list(M.characters), store.list(M.sourceLinks), store.list(M.eventOccurrences), store.list(M.eventMasters),
-    store.list(M.ceremonyRecords), store.list(M.ceremonyDraws), store.list(M.identityChanges), store.list(M.ceremonyTemplates)]);
+    store.list(M.ceremonyRecords), store.list(M.ceremonyDraws), store.list(M.identityChanges), store.list(M.ceremonyTemplates), store.list(M.ceremonyScripts)]);
   const [dv, tv, tc, ti, dc, tp] = await Promise.all([tryList(src.diner, "pixiesVisits"), tryList(src.toko, "customerVisits"), tryList(src.toko, "customers"), tryList(src.toko, "items"), tryList(src.diner, "pixiesCustomers"), tryList(src.toko, "customerProfiles")]);
   const shop = {
     diner: dv ? { visits: dv, customers: dc } : null,
     toko: tv ? { visits: tv, sessionCustomers: tc || [], items: ti || [], profiles: tp } : null
   };
   const cutover = await getCutover(store);
-  return { cutover, persons, characters, links, occs, masters, records, draws, changes, templates, shop, index: buildIndex({ persons, characters, links }) };
+  return { scripts, cutover, persons, characters, links, occs, masters, records, draws, changes, templates, shop, index: buildIndex({ persons, characters, links }) };
 }

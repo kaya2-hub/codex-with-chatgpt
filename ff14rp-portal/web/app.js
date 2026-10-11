@@ -10,15 +10,17 @@ import { detectDrift } from "../core/drift.js";
 import { preflight, setCutover } from "../core/cutover.js";
 import { adoptDinerInfo, adoptDinerName, appendLegacyTokoNote, rescanPlan, candidateSummary } from "../core/adopt.js";
 import { applyPlan } from "../tools/migrate-lib.js";
-import { parseMacroPaste } from "../core/notion-paste.js";
 import { renderMacro, analyzeMacro, copyText } from "../core/macro.js";
-import { parseTimeline, finalizeTimeline } from "../core/timeline.js";
+import { roleJa } from "../core/roles.js";
+import { exportDoc } from "../core/exchange.js";
+import { ceremonyFacts, scriptId, setScriptStatus, createBlankDoc } from "../core/exchange-store.js";
+import { createDocUI } from "./ui-docs.js";
 
 const $ = s => document.querySelector(s);
 const safeUrl = u => /^https?:\/\/\S+$/i.test(String(u ?? "").trim()) ? String(u).trim() : "";
 const h = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
-const S = { boot: null, d: null, view: "home", edit: false, pid: null, q: "", evId: null, evTab: "overview", tl: null, cer: {}, arch: {} };
+const S = { boot: null, d: null, view: "home", edit: false, pid: null, q: "", evId: null, evTab: "overview", cer: {}, arch: {}, open: new Set(), ed: null, imp: null, exOpen: null };
 const NAV = [["home", "HOME"], ["customers", "顧客"], ["candidates", "照合候補"], ["cutover", "切替"], ["events", "イベント"], ["ceremony", "セレモニー"], ["archive", "アーカイブ"]];
 const label = () => $("#who").value;
 const val = id => document.getElementById(id)?.value ?? "";
@@ -55,11 +57,15 @@ function vHome() {
 }
 
 // ---------- 顧客 ----------
+const verText = st => (st.diner === null ? "読込失敗" : st.diner.linked ? `${st.diner.verStamps}(${st.diner.verStamps % STAMP_UNIT}/${STAMP_UNIT}・到達${Math.floor(st.diner.verStamps / STAMP_UNIT)}回分)` : "—");
+const visitsText = st => (st.total != null ? `${st.total}回` : st.diner === null || st.toko === null ? "読込失敗" : "不明");
+const dmText = p => (safeUrl(p.xDmUrl) ? `<a href="${h(safeUrl(p.xDmUrl))}" target="_blank" rel="noopener noreferrer">DMを開く</a>` : p.xDmUrl ? '<span class="warn">DM形式不正</span>' : '<span class="mut">DMなし</span>');
 function vCustomers() {
   if (S.pid) return vPerson();
   const list = finder(S.q);
-  return `<div class="card"><input type="search" id="q" placeholder="検索" value="${h(S.q)}" data-act="custq"></div>
-  <div class="card">${list.map(p => `<div class="row"><a href="#" data-act="openp" data-id="${h(p.id)}">${h(nameOf(p))}</a>${nameTags(p.id)}</div>`).join("") || '<p class="mut">該当なし</p>'}</div>`;
+  return `<div class="card"><input type="search" id="q" placeholder="検索(名前・旧名)" value="${h(S.q)}" data-act="custq"></div>
+  <div class="card clist"><div class="crow head"><span>顧客名</span><span>店舗</span><span>総合来店回数</span><span>XのDM</span><span>Verスタンプ(保存済み♥)</span></div>
+  ${list.map(p => { const st = stats(p.id); return `<div class="crow"><span><a href="#" data-act="openp" data-id="${h(p.id)}"><b>${h(nameOf(p))}</b></a></span><span>${nameTags(p.id)}</span><span data-l="総合来店回数">${h(visitsText(st))}</span><span data-l="XのDM">${dmText(p)}</span><span data-l="Verスタンプ">${h(verText(st))}</span></div>`; }).join("") || '<p class="mut">該当なし</p>'}</div>`;
 }
 function vPerson() {
   const p = S.d.persons.find(x => x.id === S.pid); if (!p) return "<p>人物が見つかりません</p>";
@@ -89,7 +95,7 @@ function vPerson() {
   ${ed ? `<div class="card"><h3>人物の統合(誤登録の整理)</h3><div class="row"><select id="mergeinto" style="max-width:260px">${active().filter(x => x.id !== p.id).map(x => `<option value="${h(x.id)}">${h(nameOf(x))}(${h(x.id.slice(-8))}・${[...new Set(entryOf(x.id).links.map(l => l.sourceSystem === "diner" ? "ダ" : "常"))].join("")}・来店${stats(x.id).total ?? "?"})</option>`).join("")}</select><button class="b dng" data-act="merge" data-from="${h(p.id)}">この人物を選んだ人物へ統合</button></div><p class="mut">元データは消えません。履歴から取り消せます。</p></div>` : ""}
   <div class="card"><h3>来店・注文履歴(読み取り専用)</h3><table>${hist.map(r => `<tr><td>${h(r.date)}</td><td><span class="tag ${r.shop}">${r.shop === "diner" ? "ダイナー" : "常若亭"}</span></td><td>${h(r.name)}</td><td>${h(r.text)} ${r.ver ? h(r.ver) : ""}</td></tr>`).join("") || '<tr><td class="mut">履歴なし</td></tr>'}</table>
   <p class="mut">注文・来店の編集はそれぞれの店舗システムで行います。</p></div>
-  ${myChanges.length ? `<div class="card"><h3>変更履歴</h3>${myChanges.map(c => `<div class="row"><span class="mut">${h(c.at.slice(0, 16))}</span>${h(c.kind)} <span class="mut">${h(c.label)}</span>${c.undone ? '<span class="tag">取り消し済み</span>' : ed ? `<button class="b" data-act="undo" data-id="${h(c.id)}">取り消す</button>` : ""}</div>`).join("")}</div>` : ""}`;
+  ${myChanges.length ? `<div class="card"><h3>変更履歴</h3>${myChanges.map(c => `<div class="row"><span class="mut">${h(c.at.slice(0, 16))}</span>${h(c.kind)} <span class="mut">${h(roleJa(c.label))}</span>${c.undone ? '<span class="tag">取り消し済み</span>' : ed ? `<button class="b" data-act="undo" data-id="${h(c.id)}">取り消す</button>` : ""}</div>`).join("")}</div>` : ""}`;
 }
 
 // ---------- 照合候補 ----------
@@ -146,51 +152,29 @@ function vCutover() {
 }
 
 // ---------- イベント ----------
+const ui = createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refresh: () => refresh(), today });
 const cur = () => S.d.occs.find(o => o.id === S.evId);
 function vEvents() {
   if (S.evId && cur()) return vOcc(cur());
-  return `<div class="card"><h2>イベントマスター</h2>${S.d.masters.map(m => `<div class="row"><b>${h(m.name)}</b><span class="tag ${h(m.store)}">${h(m.store || "共通")}</span><input type="date" id="od-${h(m.id)}" style="max-width:160px"><button class="b" data-act="mkocc" data-id="${h(m.id)}">開催回を作成(マスターから複製)</button></div>`).join("") || '<p class="mut">まだありません</p>'}
-   <div class="row"><input type="text" id="mname" placeholder="＋イベント名" style="max-width:260px"><select id="mstore" style="max-width:140px"><option value="">共通</option><option value="diner">ダイナー</option><option value="toko">常若亭</option></select><button class="b pri" data-act="mkmaster">イベント追加</button></div></div>
-  <div class="card"><h2>開催回</h2>${S.d.occs.filter(o => o.status !== "held").sort((a, b) => (b.date || "9999").localeCompare(a.date || "9999")).map(o => `<div class="row"><a href="#" data-act="openev" data-id="${h(o.id)}">${h(o.name)}</a><span class="mut">${h(o.date || "日付未定")}</span><span class="tag">${STATUS_JA[o.status]}</span>${Ev.isPastDate(o, today()) ? '<span class="tag warn">日付経過(状態は未変更)</span>' : ""}</div>`).join("") || '<p class="mut">なし</p>'}</div>`;
+  const list = S.d.occs.filter(o => o.status !== "held").sort((a, b) => (b.date || "9999").localeCompare(a.date || "9999"));
+  return `<div class="card"><h2>イベント</h2><div class="row"><button class="b pri" data-act="exnew">ChatGPTで新規作成</button><input type="text" id="nename" placeholder="イベント名(手動で作る場合)" style="max-width:260px"><button class="b" data-act="newevent">＋手動で新規作成</button></div></div>
+  ${S.exOpen === "new" ? ui.vExchange("event", null) : ""}
+  <div class="card"><h3>開催回</h3>${list.map(o => `<div class="row"><a href="#" data-act="openev" data-id="${h(o.id)}">${h(o.name)}</a><span class="mut">${h(o.date || "日付未定")}</span><span class="tag ${h(o.store)}">${h(o.store === "diner" ? "ダイナー" : o.store === "toko" ? "常若亭" : "共通")}</span><span class="tag">${STATUS_JA[o.status]}</span>${Ev.isPastDate(o, today()) ? '<span class="tag warn">日付経過(状態は未変更)</span>' : ""}</div>`).join("") || '<p class="mut">まだありません。上のボタンから作成できます</p>'}</div>
+  <details class="card"><summary class="mut">旧: イベントマスター(従来の複製元。既存データの互換のため残しています)</summary>${S.d.masters.map(m => `<div class="row"><b>${h(m.name)}</b><input type="date" id="od-${h(m.id)}" style="max-width:160px"><button class="b" data-act="mkocc" data-id="${h(m.id)}">開催回を作成(複製)</button></div>`).join("") || '<p class="mut">なし</p>'}</details>`;
 }
 function vOcc(o) {
-  const tabs = [["overview", "概要"], ["macros", "マクロ"], ["timeline", "タイムライン"], ["materials", "資料"]];
+  const { doc } = ui.docOf("event", o.id);
+  const tabs = [["overview", "基本情報"], ["macros", "マクロ"], ["timeline", "タイムライン"], ["materials", "担当・資料・準備"]];
   const next = { draft: ["scheduled", "cancelled"], scheduled: ["held", "postponed", "cancelled", "draft"], postponed: ["scheduled", "cancelled"], cancelled: ["draft"], held: [] }[o.status];
   return `<div class="row"><a href="#" data-act="openev" data-id="">← 一覧</a></div>
-  <div class="card"><h2>${h(o.name)} <span class="tag">${STATUS_JA[o.status]}</span> <span class="tag ${h(o.store)}">${h(o.store || "共通")}</span></h2>
-   <div class="row"><label>開催日<input type="date" id="odate" value="${h(o.date || "")}"></label><button class="b" data-act="setdate" data-id="${h(o.id)}" data-rev="${o.revision}">日付保存</button>
-   ${next.map(s => `<button class="b" data-act="status" data-id="${h(o.id)}" data-rev="${o.revision}" data-to="${s}">→ ${STATUS_JA[s]}</button>`).join("")}<button class="b" data-act="dup" data-id="${h(o.id)}">複製して新しい下書きを作る</button></div>
-   ${o.status === "held" ? '<p class="mut">開催済み: 編集した場合は編集前の内容が履歴に残ります</p>' : ""}${o.copiedFrom ? '<p class="mut">過去の開催回から複製</p>' : ""}</div>
+  <div class="card"><h2>${h(doc.name)} <span class="tag">${STATUS_JA[o.status]}</span> <span class="tag ${h(o.store)}">${h(o.store === "diner" ? "ダイナー" : o.store === "toko" ? "常若亭" : "共通")}</span></h2>
+   <div class="row"><button class="b pri" data-act="exedit" data-id="${h(o.id)}">ChatGPTで編集</button>${next.map(s => `<button class="b" data-act="status" data-id="${h(o.id)}" data-rev="${o.revision}" data-to="${s}">→ ${STATUS_JA[s]}</button>`).join("")}<button class="b" data-act="dup" data-id="${h(o.id)}">複製して新しい下書きを作る</button></div>
+   ${o.status === "held" ? '<p class="mut">開催済み: 編集した場合は編集前の内容が履歴に残ります</p>' : ""}${o.copiedFrom ? '<p class="mut">過去の開催回から複製</p>' : ""}${o.timelineLegacy ? '<p class="mut">旧形式のタイムラインは新形式へ変換済み(元の内容は退避して保持しています)</p>' : ""}</div>
+  ${S.exOpen === o.id ? ui.vExchange("event", o.id) : ""}
   <div class="tabs">${tabs.map(([k, t]) => `<button class="b" role="tab" data-act="evtab" data-v="${k}" aria-selected="${S.evTab === k}">${t}</button>`).join("")}</div>
-  ${S.evTab === "overview" ? `<div class="card"><textarea id="ovtext" style="white-space:pre-wrap;font-family:inherit">${h(o.overview)}</textarea><button class="b pri" data-act="saveov" data-id="${h(o.id)}" data-rev="${o.revision}">概要を保存</button>
-     <h3>メモ・反省点</h3><textarea id="memo" style="white-space:pre-wrap;font-family:inherit">${h(o.memo)}</textarea><button class="b" data-act="savememo" data-id="${h(o.id)}" data-rev="${o.revision}">メモ保存</button></div>` : ""}
-  ${S.evTab === "macros" ? vMacros(o) : ""}${S.evTab === "timeline" ? vTimeline(o) : ""}${S.evTab === "materials" ? vMaterials(o) : ""}`;
-}
-function vMacros(o) {
-  const grp = r => o.macros.map((m, i) => ({ m, i })).filter(x => x.m.role === r);
-  const block = r => `<div class="card"><h3>${r}</h3>${grp(r).map(({ m, i }) => { const a = analyzeMacro(m.body); return `<div><b>${h(m.title)}</b> <button class="b pri" data-act="copymacro" data-id="${h(o.id)}" data-i="${i}">コピー</button> <button class="b dng" data-act="delmacro" data-id="${h(o.id)}" data-rev="${o.revision}" data-i="${i}">削除</button><pre class="macro">${h(m.body)}</pre>${a.warnings.map(w => `<div class="warn mut">⚠ ${h(w)}</div>`).join("")}</div>`; }).join("") || '<p class="mut">なし</p>'}</div>`;
-  return block("Kaya") + block("Toushin") + `<div class="card"><h3>マクロ追加(原文のまま保存)</h3><div class="row"><input type="text" id="mtitle" placeholder="題名" style="max-width:240px"><select id="mrole" style="max-width:140px"><option>Kaya</option><option>Toushin</option></select></div><textarea id="mbody" placeholder="/yell … ※改行・<t>・記号をそのまま貼り付け"></textarea><button class="b pri" data-act="addmacro" data-id="${h(o.id)}" data-rev="${o.revision}">追加</button></div>
-  <div class="card"><h3>Notion/テキストから一括取り込み(貼り付け)</h3><p class="mut">Notionのページ本文をコピー(またはMarkdownエクスポートの中身)して貼り付けます。通信・API連携は使いません。コードブロック内、または「/」で始まる行が主体の節だけをマクロ候補にし、文章は取り込みません。本文は加工しません。</p>
-  <textarea id="pastesrc" placeholder="Notionの本文を貼り付け">${h(S.paste?.src ?? "")}</textarea><button class="b" data-act="pasteparse">候補を作る</button>
-  ${S.paste ? `${S.paste.res.blocks.map((b, i) => `<div class="card"><label><input type="checkbox" id="pk-${i}" checked> 取り込む</label><div class="row"><input type="text" id="pt-${i}" value="${h(b.title)}"><select id="pr-${i}" style="max-width:140px"><option value="" ${b.role ? "" : "selected"}>役割を選択</option><option ${b.role === "Kaya" ? "selected" : ""}>Kaya</option><option ${b.role === "Toushin" ? "selected" : ""}>Toushin</option></select></div><textarea id="pb-${i}">${h(b.body)}</textarea></div>`).join("")}
-  ${S.paste.res.skipped.length ? `<p class="mut">取り込み対象外: ${S.paste.res.skipped.map(k => `${h(k.title)}(${k.lines}行)`).join(" / ")}</p>` : ""}
-  ${S.paste.res.blocks.length ? `<button class="b pri" data-act="pastesave" data-id="${h(o.id)}" data-rev="${o.revision}">選んだ候補を追加</button>` : '<p class="warn">マクロ候補が見つかりませんでした</p>'}` : ""}</div>`;
-}
-function tlView(t) {
-  return `<div class="cols3"><div class="h">Kaya</div><div class="h">タイミング・合図・共通条件</div><div class="h">Toushin</div>${t.rows.map(r => `${r.phase ? `<div class="mut" style="grid-column:1/-1">▼ ${h(r.phase)}</div>` : ""}<div class="cell">${h(r.kaya)}</div><div class="cell">${h(r.cue)}</div><div class="cell">${h(r.toushin)}</div>`).join("")}</div>${t.unclassified?.length ? `<p class="warn">未分類 ${t.unclassified.length}行: ${t.unclassified.map(u => h(u.text)).join(" / ")}</p>` : ""}`;
-}
-function vTimeline(o) {
-  const d = S.tl;
-  return `<div class="card"><h3>現在のタイムライン</h3>${o.timeline.rows.length || o.timeline.unclassified?.length ? tlView(o.timeline) : '<p class="mut">未登録</p>'}</div>
-  <div class="card"><h3>自由文から3列に整理</h3><p class="mut">「Kaya:」「Toushin:」「共通:」「[00:30]」「Kaya｜合図｜Toushin」形式を認識します。認識できない行は未分類に残し、補完しません。</p>
-  <textarea id="tlsrc" style="white-space:pre-wrap">${h(d?.sourceText ?? o.timeline.sourceText ?? "")}</textarea><button class="b" data-act="tlparse">プレビュー</button>
-  ${d ? `<h3>プレビュー(編集できます)</h3>${d.rows.map((r, i) => `<div class="cols3" style="margin-bottom:6px"><input type="text" id="tk-${i}" value="${h(r.kaya)}"><input type="text" id="tc-${i}" value="${h(r.cue)}"><input type="text" id="tt-${i}" value="${h(r.toushin)}"></div>`).join("")}
-   ${d.unclassified.length ? `<h3 class="warn">未分類(${d.unclassified.length}行)</h3>${d.unclassified.map((u, i) => `<div class="row"><span class="grow">${h(u.text)}</span><select id="ua-${i}"><option value="">未分類のまま</option><option value="kaya">Kayaへ</option><option value="cue">中央へ</option><option value="toushin">Toushinへ</option></select></div>`).join("")}` : ""}
-   <button class="b pri" data-act="tlsave" data-id="${h(o.id)}" data-rev="${o.revision}">保存</button>` : ""}</div>`;
-}
-function vMaterials(o) {
-  return `<div class="card">${o.materials.map((m, i) => `<div class="row"><b>${h(m.label)}</b>${safeUrl(m.url) ? `<a href="${h(safeUrl(m.url))}" target="_blank" rel="noopener noreferrer">${h(m.url)}</a>` : h(m.url)}<span class="mut">${h(m.note || "")}</span><button class="b dng" data-act="delmat" data-id="${h(o.id)}" data-rev="${o.revision}" data-i="${i}">削除</button></div>`).join("") || '<p class="mut">なし</p>'}
-  <div class="row"><input type="text" id="matl" placeholder="名前" style="max-width:160px"><input type="text" id="matu" placeholder="URL(チラシ/Notion等)"><button class="b" data-act="addmat" data-id="${h(o.id)}" data-rev="${o.revision}">追加</button></div><p class="mut">リンクは失効することがあります。重要な資料は別途保管してください。</p></div>`;
+  ${S.evTab === "overview" ? ui.vFields("event", o.id, doc, ["name", "store", "date", "startTime", "endTime", "venue", "overview", "plan", "memo"]) : ""}
+  ${S.evTab === "macros" ? ui.vMacros("event", o.id, doc) : ""}${S.evTab === "timeline" ? ui.vTimeline("event", o.id, doc) : ""}
+  ${S.evTab === "materials" ? ui.vStaff("event", o.id, doc) + ui.vMaterials("event", o.id, doc) + ui.vFields("event", o.id, doc, ["prep", "cautions"]) : ""}`;
 }
 
 // ---------- セレモニー ----------
@@ -200,7 +184,7 @@ function ceremonyTargets() {
 function vCeremony() {
   const t = ceremonyTargets();
   const sel = S.cer.pid && t.find(x => x.person.id === S.cer.pid);
-  let html = `<div class="card"><h2>対象者(Verスタンプ ${STAMP_UNIT}到達ごと)</h2><p class="mut">来店回数ではなくダイナーのVerスタンプ数(保存済み♥)から判定。単位は仮設定: ${STAMP_UNIT}(運用者確認事項)。</p>
+  let html = `<div class="card"><h2>対象者(Verスタンプ ${STAMP_UNIT}到達ごと)</h2><p class="mut">来店回数ではなくダイナーのVerスタンプ数(保存済み♥)から判定します。${STAMP_UNIT}スタンプごとに到達です(確定仕様)。到達・原稿の完成・実施済み・持ち越しはそれぞれ別に管理します。</p>
    ${t.map(x => `<div class="row"><a href="#" data-act="cerpick" data-id="${h(x.person.id)}">${h(nameOf(x.person))}</a>スタンプ ${x.st.diner.verStamps} ${x.units.map(u => `<span class="tag ${u.status === "done" ? "" : "warn"}">${u.stampValue}:${{ done: "実施済み", carried: "持越", reached_pending: "到達済み未実施" }[u.status]}</span>`).join("")}</div>`).join("") || '<p class="mut">対象者なし</p>'}</div>
    <div class="card"><h3>演目の状態</h3>${Object.values(Ce.ACTS).map(a => `<span class="tag ${a.state === "complete" ? "" : "warn"}">${h(a.name)}: ${h(a.note)}</span>`).join(" ")}</div>`;
   if (!sel) return html;
@@ -220,17 +204,38 @@ function vCeremony() {
    <label>店舗<select id="cshop" data-act="cerset"><option value="diner" ${shop === "diner" ? "selected" : ""}>ダイナー</option><option value="toko" ${shop === "toko" ? "selected" : ""}>常若亭</option></select></label>
    <label>営業日<input type="date" id="cdate" value="${h(date)}" data-act="cerset"></label></div>
    <p>来店回数(人物・確認済み): <b>${total == null ? "不明(自動入力しません)" : total}</b> / Verスタンプ: <b>${sel.st.diner.verStamps}</b> ${sel.st.notes.map(n => `<span class="warn mut">⚠ ${h(n)}</span>`).join("")}</p>
+   <p class="mut">この達成の原稿は下の「セレモニー原稿」で作成・編集します。原稿を作っても実施済みにはなりません。</p>
    <h3>ダーツの結果(${h(date)}・${shop === "diner" ? "ダイナー" : "常若亭"})</h3>
    ${draw ? `<p>この営業回の演目は <b>${h(Ce.ACTS[draw.act].name)}</b> に決定済み(最初の対象者: ${h(S.d.persons.find(p => p.id === draw.decidedFor) ? nameOf(S.d.persons.find(p => p.id === draw.decidedFor)) : draw.decidedFor)})。後続の対象者は同じ演目です。 <button class="b dng" data-act="cleardraw">結果を取り消す</button></p>`
      : `<div class="row"><button class="b" data-act="draw" data-act2="gg" data-p="${h(sel.person.id)}">GGコール</button><button class="b" data-act="draw" data-act2="monster" data-p="${h(sel.person.id)}">魔物ショー</button><span class="mut">その営業回で最初の対象者の結果のみ登録できます</span></div>`}
    ${act ? `<h3>${h(Ce.ACTS[act].name)}のマクロ</h3>${Ce.ACTS[act].state !== "complete" ? '<p class="warn">この演目は未完成の進行案段階です。本番利用の前に完成版を登録してください。</p>' : ""}
      ${tpl ? `<label>個別の感謝コメント<textarea id="cthanks" style="min-height:60px;white-space:pre-wrap" data-act="cerset">${h(c.thanks || "")}</textarea></label>
-       <pre class="macro">${h(r.text)}</pre>${r.missing.length ? `<p class="warn">未入力の変数: ${r.missing.map(h).join(", ")}(置換されていません)</p>` : ""}${analyzeMacro(r.text).warnings.map(w => `<div class="warn mut">⚠ ${h(w)}</div>`).join("")}
+       <pre class="macro" id="tplprev">${h(r.text)}</pre>${r.missing.length ? `<p class="warn">未入力の変数: ${r.missing.map(h).join(", ")}(置換されていません)</p>` : ""}${analyzeMacro(r.text).warnings.map(w => `<div class="warn mut">⚠ ${h(w)}</div>`).join("")}
        <button class="b pri" data-act="copytext">マクロをコピー</button> <span class="mut">コピーしても実施済みにはなりません</span>`
        : `<p class="warn">${act === "gg" ? "GGコールの完成マクロ本文は未取得です。" : "この演目のマクロは未登録です。"}完成版をお持ちの場合は下に貼り付けて登録してください(創作・補完はしません)。</p>`}
      <h3>テンプレート登録/差し替え</h3><textarea id="tplbody" placeholder="{{customer_name}} {{visit_count}} {{stamp_count}} {{thanks_comment}} が使えます">${h(tpl?.body || "")}</textarea><button class="b" data-act="savetpl" data-a="${act}">${tpl ? "テンプレートを更新" : "テンプレートを登録"}</button>
      <h3>実施記録</h3><div class="row"><button class="b pri" data-act="perform" data-p="${h(sel.person.id)}" data-v="${sv}" data-a="${act}" data-st="done" ${pend.length ? "" : "disabled"}>実施済みとして記録</button><button class="b" data-act="perform" data-p="${h(sel.person.id)}" data-v="${sv}" data-a="${act}" data-st="carried" ${pend.length ? "" : "disabled"}>持ち越しにする</button></div>` : ""}</div>`;
+  if (sv) html += vScript(sel, sv, cname, total, act);
   return html;
+}
+
+// ---------- セレモニー原稿(ChatGPT連携・手動編集) ----------
+function factsFor(sel, sv, act) {
+  const names = [...new Set(chars(sel.person.id).flatMap(c => [c.currentName, ...c.previousNames]))];
+  const st = sel.units.find(u => u.stampValue === sv)?.status;
+  return ceremonyFacts({ names, total: sel.st.total, verStamps: sel.st.diner?.verStamps, stampValue: sv, act: act ? Ce.ACTS[act].name : null, performance: { done: "実施済み", carried: "持ち越し", reached_pending: "到達済み・未実施" }[st] ?? "未到達(準備中)" });
+}
+function vScript(sel, sv, cname, total, act) {
+  const pid = sel.person.id, id = scriptId(pid, sv), f = ui.docOf("ceremony", id), target = { personId: pid, stampValue: sv };
+  S.cerCtx = { sel, sv, act };
+  if (!f) return `<div class="card"><h2>セレモニー原稿(${sv}スタンプ) <span class="tag">原稿なし</span></h2><div class="row"><button class="b pri" data-act="exscript" data-key="new:${h(id)}">ChatGPTで作成</button><button class="b" data-act="scriptnew" data-p="${h(pid)}" data-v="${sv}">＋手動で原稿を作る</button></div></div>${S.exOpen === `new:${id}` ? ui.vExchange("ceremony", null, { target, scope: id }) : ""}`;
+  const { doc, raw } = f;
+  return `<div class="card"><h2>セレモニー原稿(${sv}スタンプ) <span class="tag ${raw.scriptStatus === "complete" ? "" : "warn"}">原稿: ${raw.scriptStatus === "complete" ? "完成" : "下書き"}</span></h2>
+    <div class="row"><button class="b pri" data-act="exscript" data-key="${h(id)}">ChatGPTで編集</button><button class="b" data-act="scriptstatus" data-id="${h(id)}" data-to="${raw.scriptStatus === "complete" ? "draft" : "complete"}">${raw.scriptStatus === "complete" ? "下書きに戻す" : "原稿を完成にする"}</button></div>
+    <p class="mut">「原稿の完成」は実施済みとは別です。実施済みは上の「実施記録」で記録した時だけになります。</p></div>
+  ${S.exOpen === id ? ui.vExchange("ceremony", id, { target }) : ""}
+  ${ui.vFields("ceremony", id, doc, ["characterName", "content", "thanks", "postNote", "prep"])}${ui.vStaff("ceremony", id, doc)}
+  <div class="card"><h3>進行タイムライン</h3>${ui.vTimeline("ceremony", id, doc)}</div><div class="card"><h3>マクロ</h3>${ui.vMacros("ceremony", id, doc)}</div>`;
 }
 
 // ---------- アーカイブ ----------
@@ -246,7 +251,7 @@ const viewKey = () => [S.view, S.pid, S.evId, S.evTab].join("|");
 function render() {
   // 同じ画面の再描画では、入力中の値(未保存を含む)を保持する。画面が変わったら破棄。
   const key = viewKey(), typed = {};
-  if (S.lastKey === key) document.querySelectorAll("#view [id]").forEach(el => { if (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && !S.clear?.has(el.id)) typed[el.id] = el.value; });
+  if (S.lastKey === key) document.querySelectorAll("#view [id]").forEach(el => { if (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && !S.clear?.has(el.id) && !/^(sd-|imfile)/.test(el.id)) typed[el.id] = el.value; });
   S.lastKey = key; S.clear = null;
   renderNav(); $("#banner").textContent = S.boot.banner;
   const v = { home: vHome, customers: vCustomers, candidates: vCandidates, cutover: vCutover, events: vEvents, ceremony: vCeremony, archive: vArchive }[S.view];
@@ -259,6 +264,13 @@ const L = () => ({ label: label() });
 const setOcc = async (id, rev, patch) => Ev.editOccurrence(S.boot.store, id, Number(rev), patch, L());
 
 const ACTIONS = {
+  ...ui.actions,
+  exnew: () => { S.exOpen = S.exOpen === "new" ? null : "new"; S.imp = null; render(); },
+  exedit: d => { S.exOpen = S.exOpen === d.id ? null : d.id; S.imp = null; render(); },
+  exscript: d => { S.exOpen = S.exOpen === d.key ? null : d.key; S.imp = null; render(); },
+  newevent: () => run(async () => { S.evId = await createBlankDoc(S.boot.store, "event", { name: val("nename") }, L()); S.evTab = "overview"; }, "作成しました(下書き)", ["nename"]),
+  scriptnew: d => run(async () => { await createBlankDoc(S.boot.store, "ceremony", { personId: d.p, stampValue: Number(d.v), characterName: S.cerCtx ? val("cname") : "" }, L()); }, "原稿(下書き)を作りました"),
+  scriptstatus: d => run(() => setScriptStatus(S.boot.store, d.id, d.to, L()), d.to === "complete" ? "原稿を完成にしました(実施済みではありません)" : "下書きに戻しました"),
   nav: d => { S.view = d.v; S.pid = null; S.evId = null; S.q = ""; render(); },
   homeq: () => { S.q = val("q"); render(); }, custq: () => { S.q = val("q"); render(); },
   openp: d => { S.view = "customers"; S.pid = d.id || null; S.edit = false; render(); },
@@ -278,31 +290,13 @@ const ACTIONS = {
   openev: d => { S.view = "events"; S.evId = d.id || null; S.evTab = d.tab || "overview"; S.tl = null; render(); },
   evtab: d => { S.evTab = d.v; render(); },
   status: d => run(() => Ev.setStatus(S.boot.store, d.id, d.to, Number(d.rev), L()), "状態を変更しました"),
-  setdate: d => run(() => setOcc(d.id, d.rev, { date: val("odate") || null }), "日付を保存しました"),
   dup: d => run(async () => { S.evId = await Ev.duplicateOccurrence(S.boot.store, d.id); S.view = "events"; S.evTab = "overview"; }, "複製しました(新しい下書き)"),
-  saveov: d => run(() => setOcc(d.id, d.rev, { overview: val("ovtext") }), "保存しました"),
-  savememo: d => run(() => setOcc(d.id, d.rev, { memo: val("memo") }), "保存しました"),
-  addmacro: d => run(async () => { const o = S.d.occs.find(x => x.id === d.id); if (!val("mtitle").trim() || !val("mbody")) throw new Error("題名と本文が必要です"); await setOcc(d.id, d.rev, { macros: [...o.macros, { title: val("mtitle"), role: val("mrole"), body: val("mbody") }] }); }, "追加しました", ["mtitle", "mbody"]),
-  delmacro: d => confirm("マクロを削除しますか?") && run(async () => { const o = S.d.occs.find(x => x.id === d.id); await setOcc(d.id, d.rev, { macros: o.macros.filter((_, i) => i !== Number(d.i)) }); }, "削除しました"),
-  copymacro: d => copy(S.d.occs.find(x => x.id === d.id).macros[Number(d.i)].body),
-  copytext: () => copy(document.querySelector("pre.macro").textContent),
-  addmat: d => run(async () => { const o = S.d.occs.find(x => x.id === d.id); await setOcc(d.id, d.rev, { materials: [...o.materials, { label: val("matl") || val("matu"), url: val("matu") }] }); }, "追加しました", ["matl", "matu"]),
-  delmat: d => run(async () => { const o = S.d.occs.find(x => x.id === d.id); await setOcc(d.id, d.rev, { materials: o.materials.filter((_, i) => i !== Number(d.i)) }); }, "削除しました"),
-  tlparse: () => { S.tl = parseTimeline(val("tlsrc")); render(); },
-  tlsave: d => run(async () => {
-    const t = S.tl; const rows = t.rows.map((r, i) => ({ ...r, kaya: val("tk-" + i), cue: val("tc-" + i), toushin: val("tt-" + i) }));
-    const rest = [];
-    t.unclassified.forEach((u, i) => { const a = val("ua-" + i); if (a) rows.push({ phase: u.phase, kaya: "", cue: "", toushin: "", [a]: u.text, line: u.line, source: "manual", uncertain: true }); else rest.push(u); });
-    const f = finalizeTimeline({ rows, unclassified: rest, sourceText: t.sourceText }, { acceptUnclassified: true });
-    await setOcc(d.id, d.rev, { timeline: f.timeline }); S.tl = null;
-  }, "タイムラインを保存しました"),
+  copytext: () => copy(document.getElementById("tplprev").textContent),
   cutset: d => confirm(d.mode === "master" ? "共通マスターを正本にします(フラグのみの切替。店舗アプリが連携版でなければ従来のままです)。よろしいですか?" : "従来(店舗内)に戻します。よろしいですか?") && run(async () => { await refresh(); await setCutover(S.boot.store, d.sys, d.mode, preflight(preInputs(), d.sys), L()); }, "切替フラグを更新しました"),
   adopt: d => confirm("ダイナー店舗側の値を共通へ取り込みます(共通の現在値は上書きされます。履歴から取り消せます)。よろしいですか?") && run(() => adoptDinerInfo(S.boot.store, d.p, Number(d.rev), S.d.shop.diner.customers.find(x => x.id === d.c), d.f.split(","), L()), "取り込みました"),
   adoptname: d => confirm("ダイナー側の名前に改名として更新します(旧名は保持)。よろしいですか?") && run(() => adoptDinerName(S.boot.store, d.ch, d.n, L()), "改名として取り込みました"),
   applegacy: d => confirm("旧備考を共通備考の末尾へ追記します(元の旧備考は残ります)。よろしいですか?") && run(async () => { const p = S.d.persons.find(x => x.id === d.id); const prof = S.d.shop.toko.profiles.find(x => x.id === d.n); await appendLegacyTokoNote(S.boot.store, d.id, p.revision, prof.notes, L()); }, "追記しました"),
   rescan: () => run(async () => { const sh = S.d.shop; const plan = rescanPlan({ dinerCustomers: sh.diner?.customers ?? [], tokoProfiles: sh.toko?.profiles ?? [] }, `rescan-${Date.now().toString(36)}`); const r = await applyPlan(S.boot.store, plan); toast(`追加 ${r.created}件(既存で内容が違うため触れなかったもの ${r.skippedDiffering.length}件)`); }),
-  pasteparse: () => { const src = val("pastesrc"); S.paste = { src, res: parseMacroPaste(src) }; render(); },
-  pastesave: d => run(async () => { const o = S.d.occs.find(x => x.id === d.id); const add = []; S.paste.res.blocks.forEach((b, i) => { if (!document.getElementById("pk-" + i).checked) return; const role = val("pr-" + i); if (!role) throw new Error("役割(Kaya/Toushin)を選んでください"); add.push({ title: val("pt-" + i), role, body: val("pb-" + i) }); }); if (!add.length) throw new Error("取り込む候補がありません"); await setOcc(d.id, d.rev, { macros: [...o.macros, ...add] }); S.paste = null; }, "マクロを追加しました"),
   asearch: () => { S.arch = { store: val("astore"), name: val("aname"), year: val("ayear") }; render(); },
   cerpick: d => { S.view = "ceremony"; S.cer = { pid: d.id }; render(); },
   cerset: () => { S.cer = { ...S.cer, stamp: val("cstamp"), cname: val("cname"), shop: val("cshop"), date: val("cdate"), thanks: document.getElementById("cthanks") ? val("cthanks") : S.cer.thanks }; render(); },
@@ -315,6 +309,12 @@ const ACTIONS = {
 };
 async function copy(text) { try { await navigator.clipboard.writeText(copyText(text)); toast("コピーしました"); } catch { const ta = document.createElement("textarea"); ta.value = text; document.body.append(ta); ta.select(); try { document.execCommand("copy"); toast("コピーしました"); } catch { toast("コピーに失敗しました。手動で選択してください", true); } ta.remove(); } }
 
+S.render = render;
+S.hooks = {
+  skeleton: (pid, sv) => { const c = S.cerCtx; return { schema: "ff14rp.ceremony", version: 1, op: "create", target: { personId: pid, stampValue: sv }, facts: factsFor(c.sel, sv, c.act), ceremony: { characterName: "", content: "", thanks: "", staff: [], timeline: { version: 2, steps: [] }, macros: [], prep: [], postNote: "" } }; },
+  exportCeremony: (raw, pid, sv) => exportDoc("ceremony", raw, { target: { personId: pid, stampValue: sv }, facts: factsFor(S.cerCtx.sel, sv, S.cerCtx.act) })
+};
+document.addEventListener("toggle", e => { const k = e.target?.dataset?.openKey; if (k) { if (e.target.open) S.open.add(k); else S.open.delete(k); } }, true);
 document.addEventListener("click", e => { const t = e.target.closest("[data-act]"); if (!t || t.matches("input,select,textarea")) return; e.preventDefault(); const f = ACTIONS[t.dataset.act]; if (f) f({ ...t.dataset }); });
 let composing = false;
 document.addEventListener("compositionstart", () => { composing = true; });

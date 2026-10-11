@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import fs from "node:fs"; import os from "node:os"; import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { snapshotFromTypedDocs, snapshotFromPlainVisits, compareVer, summarize } from "../tools/ver-lib.js";
-import { parseMacroPaste } from "../core/notion-paste.js";
 import { syntheticShops } from "../fixtures/synthetic.js";
 import { migratedStore } from "./helpers.js";
 import { adoptDinerInfo, appendLegacyTokoNote, candidateSummary, rescanPlan, adoptDinerName } from "../core/adopt.js";
@@ -27,17 +26,6 @@ test("VER: バックアップ(型付き)形式からのスナップショット"
   const docs = new Map([["pixiesVisits/v1", { orderType: { stringValue: "VER" }, verCounted: { booleanValue: true }, verCountExclusion: { stringValue: "" }, verCountOverride: { stringValue: "counted" } }], ["pixiesVisits/v2", { orderType: { stringValue: "A" }, verCounted: { booleanValue: false }, verCountExclusion: { stringValue: "not_ver" } }], ["pixiesCustomers/c1", { customerName: { stringValue: "x" } }]]);
   const sn = snapshotFromTypedDocs(docs); assert.deepEqual(Object.keys(sn), ["v1", "v2"]);
   assert.deepEqual(summarize(sn), { visits: 2, counted: 1, notCounted: 1, notCountedWithReason: 1, overrideCounted: 1, overrideNotCounted: 0, countedNonVer: 0 });
-});
-test("MAC Notion貼り付け: フェンス内/コマンド主体の節だけ取り込み、本文不変、文章は対象外、役割は見出しからのみ推定", () => {
-  const body = "/yell <t>さん！\n\n/s ♡ 全角　スペース\n/wait 3\n/s {{customer_name}}";
-  const text = `# GGコール\n進行メモの文章です。\n## Kaya\n\`\`\`\n${body}\n\`\`\`\n## Toushin 側\n/s 返事だよ\n/wait 2\n## 補足\nこれは説明の文章であり、マクロではありません。\n`;
-  const r = parseMacroPaste(text);
-  assert.equal(r.blocks.length, 2);
-  assert.equal(r.blocks[0].body, body); assert.equal(r.blocks[0].role, "Kaya"); assert.equal(r.blocks[0].source, "fence");
-  assert.equal(r.blocks[1].body, "/s 返事だよ\n/wait 2"); assert.equal(r.blocks[1].role, "Toushin");
-  assert.ok(r.skipped.some(k => k.title === "GGコール") && r.skipped.some(k => k.title === "補足"));
-  assert.deepEqual(parseMacroPaste("普通の文章だけ").blocks, []);
-  assert.equal(parseMacroPaste("# x\n```\n/s a\n").blocks.length, 0); // 閉じていないフェンスは取り込まない
 });
 test("切替前の取り込み: ダイナー値取込・名前取込・旧備考の明示追記(重複拒否)・再スキャンは冪等・候補要約は内容を含まない", async () => {
   const { store, shops, plan } = await migratedStore();

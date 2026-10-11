@@ -189,6 +189,10 @@ try {
     const t = await page.innerText("#view"); for (const w of ["追加 1", "変更 ", "削除 1", "競合 0", "変更前(現在)", "変更後(取り込み)", "反映後の全内容"]) assert.ok(t.includes(w), `差分表示に「${w}」がない`);
     assert.ok(await page.locator(".chg.ch-add").count() >= 1 && await page.locator(".chg.ch-remove").count() >= 1 && await page.locator(".chg.ch-edit").count() >= 1); // 視覚的区別
     assert.ok(await page.locator(".chg .cell.c-kaya").count() > 0); // 差分内もかや/トーシンの色分け
+    assert.equal(await page.locator('.chg [data-act="mcopy"]').count(), 0); // 差分カード内に誤ったコピー元を出さない
+    const fin = page.locator("details.card", { has: page.locator("summary", { hasText: "反映後の全内容" }) }); await fin.locator("summary").first().click();
+    const n0 = await fin.locator("#pv-tl .step").count(); await page.locator('.chg.ch-remove input[type="checkbox"]').first().uncheck(); // 削除を採用しない→最終形のステップが1つ増える
+    await page.waitForFunction(n => document.querySelectorAll("details.card #pv-tl .step").length === n + 1, n0); assert.equal(await page.locator(".chg.ch-remove input:checked").count(), 0); await page.locator('.chg.ch-remove input[type="checkbox"]').first().check();
     await page.locator('input[id^="ck-field:venue"]').uncheck(); await act("imcommit"); await page.waitForFunction(() => document.body.innerText.includes("取り込みました"));
     await page.click('[data-act="evtab"][data-v="timeline"]'); const tl = await page.innerText("#view"); assert.ok(tl.includes("22:50(5分早め)") && tl.includes("追加のかやのセリフ") && tl.includes("かやのセリフ変更後"));
     assert.equal(await page.locator("#doc-tl .step").count(), 15); // +1 -1

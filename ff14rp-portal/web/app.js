@@ -250,7 +250,7 @@ function vArchive() {
 }
 
 // ---------- 描画/イベント ----------
-const viewKey = () => [S.view, S.pid, S.evId, S.evTab].join("|");
+const viewKey = () => [S.view, S.pid, S.evId, S.evTab, S.cer.pid, S.cer.stamp].join("|");
 function render() {
   S.ed && ui.readDraft(); // 編集中の入力は再描画の前に必ずドラフトへ取り込む
   // 同じ画面の再描画では、入力中の値(未保存を含む)を保持する。画面が変わったら破棄。
@@ -259,6 +259,7 @@ function render() {
   S.lastKey = key; S.clear = null;
   renderNav(); $("#banner").textContent = S.boot.banner;
   const v = { home: vHome, customers: vCustomers, candidates: vCandidates, cutover: vCutover, events: vEvents, ceremony: vCeremony, archive: vArchive }[S.view];
+  document.getElementById("view").style.setProperty("--sticky-top", S.em.size ? "52px" : "0px");
   const keep = document.activeElement?.id, pos = document.activeElement?.selectionStart;
   $("#view").innerHTML = v();
   for (const [id, v_] of Object.entries(typed)) { const el = document.getElementById(id); if (el && el.value !== v_ && !(el.tagName === "SELECT" && ![...el.options].some(o => o.value === v_))) el.value = v_; }
@@ -294,7 +295,7 @@ const ACTIONS = {
   openev: d => { if (!ui.leaveGuard()) return; S.view = "events"; S.evId = d.id || null; S.evTab = d.tab || "overview"; S.tl = null; render(); },
   evtab: d => { if (ui.dirtyFields() && !confirm("保存していない入力があります。破棄して移動しますか?")) return; S.evTab = d.v; render(); },
   status: d => run(() => Ev.setStatus(S.boot.store, d.id, d.to, Number(d.rev), L()), "状態を変更しました"),
-  dup: d => run(async () => { S.evId = await Ev.duplicateOccurrence(S.boot.store, d.id); S.view = "events"; S.evTab = "overview"; }, "複製しました(新しい下書き)"),
+  dup: d => { if (!ui.leaveGuard()) return; return run(async () => { S.evId = await Ev.duplicateOccurrence(S.boot.store, d.id); S.view = "events"; S.evTab = "overview"; }, "複製しました(新しい下書き)"); },
   copytext: () => copy(document.getElementById("tplprev").textContent),
   cutset: d => confirm(d.mode === "master" ? "共通マスターを正本にします(フラグのみの切替。店舗アプリが連携版でなければ従来のままです)。よろしいですか?" : "従来(店舗内)に戻します。よろしいですか?") && run(async () => { await refresh(); await setCutover(S.boot.store, d.sys, d.mode, preflight(preInputs(), d.sys), L()); }, "切替フラグを更新しました"),
   adopt: d => confirm("ダイナー店舗側の値を共通へ取り込みます(共通の現在値は上書きされます。履歴から取り消せます)。よろしいですか?") && run(() => adoptDinerInfo(S.boot.store, d.p, Number(d.rev), S.d.shop.diner.customers.find(x => x.id === d.c), d.f.split(","), L()), "取り込みました"),
@@ -303,7 +304,7 @@ const ACTIONS = {
   rescan: () => run(async () => { const sh = S.d.shop; const plan = rescanPlan({ dinerCustomers: sh.diner?.customers ?? [], tokoProfiles: sh.toko?.profiles ?? [] }, `rescan-${Date.now().toString(36)}`); const r = await applyPlan(S.boot.store, plan); toast(`追加 ${r.created}件(既存で内容が違うため触れなかったもの ${r.skippedDiffering.length}件)`); }),
   asearch: () => { S.arch = { store: val("astore"), name: val("aname"), year: val("ayear") }; render(); },
   cerpick: d => { if (!ui.leaveGuard()) return; S.view = "ceremony"; S.cer = { pid: d.id }; render(); },
-  cerset: () => { S.cer = { ...S.cer, stamp: val("cstamp"), cname: val("cname"), shop: val("cshop"), date: val("cdate"), thanks: document.getElementById("cthanks") ? val("cthanks") : S.cer.thanks }; render(); },
+  cerset: () => { const nx = { stamp: val("cstamp"), cname: val("cname"), shop: val("cshop"), date: val("cdate") }; if ((nx.stamp !== (S.cer.stamp ?? nx.stamp) || nx.cname !== (S.cer.cname ?? nx.cname) || nx.shop !== (S.cer.shop ?? nx.shop) || nx.date !== (S.cer.date ?? nx.date)) && !ui.leaveGuard()) { render(); return; } S.cer = { ...S.cer, stamp: val("cstamp"), cname: val("cname"), shop: val("cshop"), date: val("cdate"), thanks: document.getElementById("cthanks") ? val("cthanks") : S.cer.thanks }; render(); },
   draw: d => confirm(`${Ce.ACTS[d.act2].name}で確定します。この営業回(${val("cdate")})の全対象者に適用されます。よろしいですか?`) && run(() => Ce.recordDraw(S.boot.store, { storeId: val("cshop"), businessDate: val("cdate"), act: d.act2, personId: d.p, label: label() }), "ダーツの結果を登録しました"),
   savetpl: d => run(async () => { const ex = S.d.templates.find(t => t.act === d.a); if (!val("tplbody")) throw new Error("本文が空です"); if (ex) await S.boot.store.batch([{ op: "update", col: M.ceremonyTemplates, id: ex.id, expectedRevision: ex.revision, data: { body: val("tplbody") } }]); else await S.boot.store.batch([{ op: "create", col: M.ceremonyTemplates, id: "tpl-" + d.a, data: { act: d.a, body: val("tplbody") } }]); }, "テンプレートを保存しました"),
   cleardraw: () => confirm("この営業回のダーツ結果を取り消しますか?(実施/持越の記録がある場合は取り消せません)") && run(() => Ce.clearDraw(S.boot.store, { storeId: val("cshop"), businessDate: val("cdate") }), "ダーツ結果を取り消しました"),
@@ -313,18 +314,19 @@ const ACTIONS = {
 };
 async function copy(text) { try { await navigator.clipboard.writeText(copyText(text)); toast("コピーしました"); } catch { const ta = document.createElement("textarea"); ta.value = text; document.body.append(ta); ta.select(); try { document.execCommand("copy"); toast("コピーしました"); } catch { toast("コピーに失敗しました。手動で選択してください", true); } ta.remove(); } }
 
+window.addEventListener("beforeunload", e => { if (S.em.size && ui.isDirty()) { e.preventDefault(); e.returnValue = ""; } });
 S.render = render;
 S.hooks = {
   skeleton: (pid, sv) => { const c = S.cerCtx; return { schema: "ff14rp.ceremony", version: 1, op: "create", target: { personId: pid, stampValue: sv }, facts: factsFor(c.sel, sv, c.act), ceremony: { characterName: "", content: "", thanks: "", staff: [], timeline: { version: 2, steps: [] }, macros: [], prep: [], postNote: "" } }; },
   exportCeremony: (raw, pid, sv) => exportDoc("ceremony", raw, { target: { personId: pid, stampValue: sv }, facts: factsFor(S.cerCtx.sel, sv, S.cerCtx.act) })
 };
-document.addEventListener("toggle", e => { const k = e.target?.dataset?.openKey; if (k) { if (e.target.dataset.defaultOpen) { if (e.target.open) S.shut.delete(k); else S.shut.add(k); } else if (e.target.open) S.open.add(k); else S.open.delete(k); } }, true);
+document.addEventListener("toggle", e => { const k = e.target?.dataset?.openKey; if (k && !/^[a-z]+:__pv/.test(k)) { if (e.target.dataset.defaultOpen) { if (e.target.open) S.shut.delete(k); else S.shut.add(k); } else if (e.target.open) S.open.add(k); else S.open.delete(k); } }, true);
 document.addEventListener("click", e => { const t = e.target.closest("[data-act]"); if (!t || t.matches("input,select,textarea")) return; e.preventDefault(); const f = ACTIONS[t.dataset.act]; if (f) f({ ...t.dataset }); });
 let composing = false;
 document.addEventListener("compositionstart", () => { composing = true; });
 document.addEventListener("compositionend", e => { composing = false; if (e.target.matches?.("input[type=search][data-act]")) ACTIONS[e.target.dataset.act]({}); });
 document.addEventListener("input", e => { if (composing) return; const t = e.target; if (t.matches("input[type=search][data-act]")) ACTIONS[t.dataset.act]({}); });
-document.addEventListener("change", e => { const t = e.target; if (t.matches("select[data-act],input[type=date][data-act],input[type=file][data-act],textarea[data-act]")) ACTIONS[t.dataset.act]({}); });
+document.addEventListener("change", e => { const t = e.target; if (t.matches("select[data-act],input[type=date][data-act],input[type=file][data-act],input[type=checkbox][data-act],textarea[data-act]")) ACTIONS[t.dataset.act]({}); });
 
 (async () => {
   try {

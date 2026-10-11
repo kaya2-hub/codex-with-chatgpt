@@ -47,17 +47,17 @@ export function createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refre
   const rtag = r => `<span class="rt rt-${h(r)}">${h(rj(r))}</span>`;
   const isOpen = (key, force) => force || S.open.has(key);
   const dirtyFields = () => [...document.querySelectorAll('#view [id^="f-"]')].some(el => "o" in el.dataset && el.value !== el.dataset.o);
-  const isDirty = () => { if (S.ed) readDraft(); return !!(S.ed && hashOf(S.ed.draft) !== S.ed.initHash) || dirtyFields(); };
+  const isDirty = (kind, id) => { if (S.ed) readDraft(); return !!(S.ed && (kind === undefined || (S.ed.kind === kind && S.ed.id === id)) && hashOf(S.ed.draft) !== S.ed.initHash) || dirtyFields(); };
   const isEdit = (kind, id) => S.em.has(`${kind}:${id}`);
 
   function modeBar(kind, id, extra = "") {
     if (!isEdit(kind, id)) return `<div class="row"><button class="b" data-act="emon" data-kind="${kind}" data-id="${h(id)}">✎ 編集モード</button><span class="mut">いまは閲覧モードです(マクロのコピーや折り畳みは、このままできます)</span></div>`;
     return `<div class="editbar" role="status"><b>✎ 編集モード</b><span>変更は項目ごとに「保存」を押したとき保存されます</span><span class="grow"></span>${extra}<button class="b" data-act="emoff" data-kind="${kind}" data-id="${h(id)}">編集を終了(閲覧に戻る)</button></div>`;
   }
-  function macroBlock(kind, id, m, edit, force) {
+  function macroBlock(kind, id, m, edit, force, copyBtn = true) {
     const key = `m:${id}:${m.id}`; if (edit && isEd(kind, id, "macro", m.id)) return edForm(S.ed);
     const a = analyzeMacro(m.body);
-    const ctl = `<button class="b pri" data-act="mcopy" data-kind="${kind}" data-id="${h(id)}" data-item="${h(m.id)}">コピー</button>` + (edit ? ` <button class="b" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="macro" data-item="${h(m.id)}">編集</button> <button class="b dng" data-act="eddel" data-kind="${kind}" data-id="${h(id)}" data-type="macro" data-item="${h(m.id)}" data-hash="${hashOf(m)}">削除</button>` : "");
+    const ctl = (copyBtn ? `<button class="b pri" data-act="mcopy" data-kind="${kind}" data-id="${h(id)}" data-item="${h(m.id)}">コピー</button>` : "") + (edit ? ` <button class="b" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="macro" data-item="${h(m.id)}">編集</button> <button class="b dng" data-act="eddel" data-kind="${kind}" data-id="${h(id)}" data-type="macro" data-item="${h(m.id)}" data-hash="${hashOf(m)}">削除</button>` : "");
     return `<details class="mac mac-${h(m.role)}" data-open-key="${h(key)}" ${isOpen(key, force) ? "open" : ""}><summary>${rtag(m.role)} <b>${h(m.title)}</b> ${ctl}</summary><pre class="macro">${h(m.body)}</pre>${m.note ? `<div class="mut">${h(m.note)}</div>` : ""}${a.warnings.map(w => `<div class="warn mut">⚠ ${h(w)}</div>`).join("")}</details>`;
   }
   function vMacros(kind, id, doc, edit = false, force = false) {
@@ -66,7 +66,7 @@ export function createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refre
       return `<details class="card grp grp-${rid || "x"}" data-open-key="${h(gk)}" ${isOpen(gk, force) ? "open" : ""}><summary><b>${h(ja)}のマクロ</b> <span class="mut">${ms.length}件</span></summary>${ms.map(m => macroBlock(kind, id, m, edit, force)).join("") || '<p class="mut">なし</p>'}</details>`; }).join("")
       + (!edit ? "" : isEd(kind, id, "macro", "new") ? edForm(S.ed) : `<button class="b pri" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="macro" data-item="new">＋マクロを追加</button>`);
   }
-  const colItems = items => items.map(it => `<div class="it"><span class="tag it-${it.type}">${TYPE_JA[it.type]}</span> <span style="white-space:pre-wrap">${h(it.text)}</span></div>`).join("");
+  const colItems = items => items.map(it => `<div class="it"><span class="tag it-${h(it.type)}">${TYPE_JA[it.type]}</span> <span style="white-space:pre-wrap">${h(it.text)}</span></div>`).join("");
   const stepBlock = (s, ctl = "") => `<div class="step"><div class="row"><b>${h(s.time || "(時刻未定)")}</b>${s.phase ? `<span class="tag">${h(s.phase)}</span>` : ""}${s.note ? `<span class="mut">${h(s.note)}</span>` : ""}<span class="grow"></span>${ctl}</div>
     <div class="cols3"><div class="cell c-kaya"><div class="cl">かや</div>${colItems(s.kaya)}</div><div class="cell c-cue"><div class="cl">タイミング・合図・共通条件</div>${colItems(s.cue)}</div><div class="cell c-toushin"><div class="cl">トーシン</div>${colItems(s.toushin)}</div></div></div>`;
   function vTimeline(kind, id, doc, edit = false) {
@@ -82,8 +82,10 @@ export function createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refre
     const key = LISTKEY[type]; const items = doc[key];
     return `<div class="card"><h3>${title}</h3>${items.map(x => edit && isEd(kind, id, type, x.id) ? edForm(S.ed) : `<div class="row">${render(x)}<span class="grow"></span>${edit ? `<button class="b" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="${type}" data-item="${h(x.id)}">編集</button><button class="b dng" data-act="eddel" data-kind="${kind}" data-id="${h(id)}" data-type="${type}" data-item="${h(x.id)}" data-hash="${hashOf(x)}">削除</button>` : ""}</div>`).join("") || '<p class="mut">なし</p>'}${!edit ? "" : isEd(kind, id, type, "new") ? edForm(S.ed) : `<button class="b" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="${type}" data-item="new">＋追加</button>`}</div>`;
   }
-  const vStaff = (kind, id, doc, edit = false) => vList(kind, id, doc, "staff", "担当・役割", x => `${rtag(x.role)} ${h(x.duty)}`, edit);
-  const vMaterials = (kind, id, doc, edit = false) => vList(kind, id, doc, "material", "資料", x => `<b>${h(x.label || x.url)}</b> ${safeUrl(x.url) ? `<a href="${h(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${h(x.url)}</a>` : h(x.url)} <span class="mut">${h(x.note)}</span>`, edit);
+  const staffHtml = x => `${rtag(x.role)} ${h(x.duty)}`;
+  const materialHtml = x => `<b>${h(x.label || x.url)}</b> ${safeUrl(x.url) ? `<a href="${h(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${h(x.url)}</a>` : h(x.url)} <span class="mut">${h(x.note)}</span>`;
+  const vStaff = (kind, id, doc, edit = false) => vList(kind, id, doc, "staff", "担当・役割", staffHtml, edit);
+  const vMaterials = (kind, id, doc, edit = false) => vList(kind, id, doc, "material", "資料", materialHtml, edit);
   /** 閲覧用の項目表示(登録後の画面と取り込みプレビューで共通)。 */
   function vFieldsView(kind, doc, fields) {
     const show = f => { const v = doc[f]; if (f === "store") return STORE_JA[v] ?? "共通・未定"; if (f === "date") return v || "未定"; if (Array.isArray(v)) return v.length ? `<ul>${v.map(x => `<li style="white-space:pre-wrap">${h(x)}</li>`).join("")}</ul>` : null; return v ? `<span style="white-space:pre-wrap">${h(v)}</span>` : null; };
@@ -144,9 +146,9 @@ export function createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refre
     if (c.kind === "order") return `<ol>${v.map(i => { const it = (c.area === "steps" ? curDoc.timeline.steps : curDoc[c.area]).find(x => x.id === i); return `<li>${h(it ? (c.area === "steps" ? `${it.time} ${it.phase}`.trim() || "(時刻未定)" : it.title ?? it.label ?? it.duty ?? i) : i)}</li>`; }).join("")}</ol>`;
     if (c.kind === "field") return Array.isArray(v) ? (v.length ? `<ul>${v.map(x => `<li>${h(x)}</li>`).join("")}</ul>` : '<span class="mut">(空)</span>') : `<pre class="macro">${h(c.area === "store" ? STORE_JA[v] ?? "共通・未定" : String(v) || "(空)")}</pre>`;
     if (c.area === "steps") return stepBlock(v);
-    if (c.area === "macros") return macroBlock(kind, "__pv__", v, false, true);
-    if (c.area === "staff") return `${rtag(v.role)} ${h(v.duty)}`;
-    return `<b>${h(v.label)}</b> ${h(v.url)} <span class="mut">${h(v.note)}</span>`;
+    if (c.area === "macros") return macroBlock(kind, "__pvd__", v, false, true, false);
+    if (c.area === "staff") return staffHtml(v);
+    return materialHtml(v);
   }
   function vPreview(ex, kind) {
     const p = ex.preview;
@@ -161,11 +163,10 @@ export function createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refre
     return `${warnAll}<div class="card previewbar"><b>変更の差分(チェックした変更だけを反映)</b> <span class="mut">対象: ${h(cur.name || cur.characterName || p.raw.id)}</span>
       <div class="row"><span class="tag ch-add">追加 ${count("ch-add")}</span><span class="tag ch-edit">変更 ${count("ch-edit")}</span><span class="tag ch-remove">削除 ${count("ch-remove")}</span><span class="tag ch-conf">競合 ${ch.filter(c => c.conflict).length}</span></div>
       ${p.plan.notes.map(n => `<div class="mut">ℹ ${h(n)}</div>`).join("")}</div>
-      ${ch.map(c => { const [bt, bc] = KIND_BADGE[c.kind]; return `<div class="card chg ${c.conflict ? "ch-conf" : bc}"><label><input type="checkbox" id="ck-${h(c.key)}" ${c.conflict || c.defaultOff ? "" : "checked"}> <span class="tag ${c.conflict ? "ch-conf" : bc}">${c.conflict ? "競合" : bt}</span> <b>${h(c.label)}</b> ${h(c.title ?? "")}</label>
-        ${c.defaultOff ? `<div class="warn">⚠ ${h(c.reason)}</div>` : ""}${c.conflict ? `<div class="bad">競合: ${h(c.reason ?? "現在の値と取り込み側の両方が変更されています")} — チェックすると<b>取り込み側を採用</b>、外すと現在の値を維持</div>` : ""}${(c.area === "macros" && c.after ? analyzeMacro(c.after.body).warnings : []).map(w => `<div class="warn mut">⚠ ${h(w)}</div>`).join("")}
-        <div class="cols3 ba"><div><div class="mut">変更前(現在)</div>${valHtml(kind, c, c.before, cur)}</div><div><div class="mut">変更後(取り込み)</div>${valHtml(kind, c, c.after, cur)}</div></div></div>`; }).join("") || '<p class="mut">差分はありません(現在のデータと同じ内容です)</p>'}
+      ${ch.map(c => { const [bt, bc] = KIND_BADGE[c.kind]; return `<div class="card chg ${c.conflict ? "ch-conf" : bc}"><label><input type="checkbox" id="ck-${h(c.key)}" data-act="ckchg" data-key="${h(c.key)}" ${(ex.decisions?.[c.key] ?? !(c.conflict || c.defaultOff)) ? "checked" : ""}> <span class="tag ${c.conflict ? "ch-conf" : bc}">${c.conflict ? "競合" : bt}</span> <b>${h(c.label)}</b> ${h(c.title ?? "")}</label>
+        ${c.defaultOff ? `<div class="warn">⚠ ${h(c.reason)}</div>` : ""}${c.conflict ? `<div class="bad">競合: ${h(c.reason ?? "現在の値と取り込み側の両方が変更されています")} — チェックすると<b>取り込み側を採用</b>、外すと現在の値を維持</div>` : ""}        <div class="cols3 ba"><div><div class="mut">変更前(現在)</div>${valHtml(kind, c, c.before, cur)}</div><div><div class="mut">変更後(取り込み)</div>${valHtml(kind, c, c.after, cur)}</div></div></div>`; }).join("") || '<p class="mut">差分はありません(現在のデータと同じ内容です)</p>'}
       ${ch.length ? '<button class="b pri" data-act="imcommit">チェックした変更を反映する</button>' : ""}
-      <details class="card"><summary><b>反映後の全内容</b> <span class="mut">(いまのチェック状態ではなく、既定の選択で反映した場合)</span></summary>${vDocAll(kind, "__pv__", pd, false)}</details>`;
+      <details class="card"><summary><b>反映後の全内容</b> <span class="mut">(いまのチェック状態で反映した場合の最終形。チェックを変えると更新されます)</span></summary>${vDocAll(kind, "__pv__", pd, false)}</details>`;
   }
 
   // ---------- 操作 ----------
@@ -186,7 +187,8 @@ export function createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refre
       if (!confirm(p.mode === "create" ? "この内容で新規登録します(下書き)。よろしいですか?" : `チェックした ${Object.values(decisions).filter(Boolean).length} 件の変更を反映します。よろしいですか?`)) return;
       return run(async () => { const r = await commitImport(store(), ex.kind, p, decisions, L()); S.imp = null; if (r.mode === "create" && ex.kind === "event") { S.view = "events"; S.evId = r.id; S.evTab = "overview"; } }, "取り込みました"); },
     emon: d => { S.em.add(`${d.kind}:${d.id}`); S.render(); },
-    emoff: d => { if (isDirty() && !confirm("保存していない変更があります。破棄して編集モードを終了しますか?")) return; S.ed = null; S.em.delete(`${d.kind}:${d.id}`); if (S.exOpen === d.id) S.exOpen = null; S.imp = null; S.render(); },
+    emoff: d => { if (isDirty(d.kind, d.id) && !confirm("保存していない変更があります。破棄して編集モードを終了しますか?")) return; S.ed = null; S.em.delete(`${d.kind}:${d.id}`); if (S.exOpen === d.id) S.exOpen = null; if (S.imp && S.imp.scope === d.id) S.imp = null; S.render(); },
+    ckchg: d => { const ex = S.imp; if (!ex?.preview?.ok || ex.preview.mode !== "update") return; ex.decisions = {}; for (const c of ex.preview.plan.changes) ex.decisions[c.key] = !!document.getElementById(`ck-${c.key}`)?.checked; ex.previewDoc = normalizeDoc(ex.kind, { ...ex.preview.raw, ...applyPlan(ex.kind, ex.preview.raw, ex.preview.data, ex.preview.plan, ex.decisions).patch }); S.render(); },
     edopen: d => { if (S.ed) { readDraft(); if (hashOf(S.ed.draft) !== S.ed.initHash && !confirm("編集中の内容があります。破棄して別の項目を開きますか?")) return; }
       const f = docOf(d.kind, d.id); if (!f) return; const key = LISTKEY[d.type]; let draft, base; const cur = d.item === "new" ? null : f.doc[key === "steps" ? "timeline" : key]; 
       const list = key === "steps" ? f.doc.timeline.steps : f.doc[key]; const it = d.item === "new" ? null : list.find(x => x.id === d.item);
@@ -216,6 +218,6 @@ export function createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refre
       return run(() => updateFields(store(), d.kind, d.id, patch, { baseValues, ...L() }), "保存しました"); }
   };
   /** 画面遷移の前に呼ぶ。編集モード中に未保存の変更があれば破棄確認。許可されたら編集状態を片付ける。 */
-  const leaveGuard = () => { if (S.em.size && isDirty() && !confirm("編集モード中に保存していない変更があります。破棄して移動しますか?")) return false; S.em.clear(); S.ed = null; return true; };
-  return { vMacros, vTimeline, vStaff, vMaterials, vFields, vExchange, vDocAll, modeBar, isEdit, leaveGuard, FIELDS, actions, docOf, readDraft, dirtyFields };
+  const leaveGuard = () => { if (S.em.size && isDirty() && !confirm("編集モード中に保存していない変更があります。破棄して移動しますか?")) return false; S.em.clear(); S.ed = null; S.exOpen = null; S.imp = null; return true; };
+  return { vMacros, vTimeline, vStaff, vMaterials, vFields, vExchange, vDocAll, modeBar, isEdit, leaveGuard, isDirty, FIELDS, actions, docOf, readDraft, dirtyFields };
 }

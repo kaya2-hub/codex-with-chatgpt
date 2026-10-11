@@ -1,7 +1,7 @@
 # 受入試験表(証拠付き)
 
 実行環境: Node 22 / Firestoreエミュレータ(`demo-ff14rp`, localhost) / Chromium。**すべて架空データ**。
-最新実行: `npm test` 34/34、`npm run test:emu` 34/34(失敗0・skip0)、`npm run test:e2e` 全PASS(11ステップ)。
+最新実行: `npm test` 39/39(emu専用1件skip)、`npm run test:emu` 40/40(失敗0・skip0)、`npm run test:e2e` 全PASS(11ステップ)。
 「実データ」列: 実顧客データでの確認が必要か。クラウドには実データが無いため **×=未検証**。
 
 | ID | 判定 | 証拠(テスト) | 実データ | 備考 |

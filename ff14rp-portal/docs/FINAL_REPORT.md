@@ -20,7 +20,7 @@
 | Gate5 回帰と公開 | **PARTIAL** | 店舗アプリは無改変のため回帰対象外。公開手順・切り戻し・ビルド/ホスティングテンプレートを整備。**公開・本番書込は未実施**。 |
 
 ## 実行した検証(最終コミット時点)
-- `npm test`(メモリ)、`npm run test:emu`(Firestoreエミュレータ `demo-ff14rp`、復元CLI結合含む)、`npm run test:e2e`(Chromium、11ステップ)。結果数値は下記「最終実行結果」。
+- `npm test`(メモリ)、`npm run test:emu`(Firestoreエミュレータ `demo-ff14rp`、復元CLI結合含む)、`npm run test:e2e`(Chromium、11ステップ)。結果: `npm test` 39件pass+1skip(エミュレータ専用)、`test:emu` 40/40 pass、e2e 全PASS。
 - 独立監査エージェントによる終了監査を実施し、major 8件・minor複数を修正(`docs/RISKS_AND_OPEN_ITEMS.md`)。残りは軽微として許容を明記。
 
 ## 利用者にしか決められないこと(次の一手)

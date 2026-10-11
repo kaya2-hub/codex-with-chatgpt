@@ -1,0 +1,68 @@
+{
+  "schema": "ff14rp.ceremony",
+  "version": 1,
+  "op": "create",
+  "target": {
+    "personId": "person-diner-cus_demo",
+    "stampValue": 7
+  },
+  "ceremony": {
+    "characterName": "テスト 太郎",
+    "content": "7スタンプ達成のお祝い。ダーツの結果に応じてGGコールまたは魔物ショーへ。",
+    "thanks": "いつも通ってくださってありがとうございます(個別コメントの下書き)",
+    "staff": [
+      {
+        "id": "st-kaya",
+        "role": "かや",
+        "duty": "ダーツ進行・コール"
+      },
+      {
+        "id": "st-toushin",
+        "role": "トーシン",
+        "duty": "BGM・演出"
+      }
+    ],
+    "timeline": {
+      "version": 2,
+      "steps": [
+        {
+          "id": "s-1",
+          "time": "セレモニー開始",
+          "phase": "導入",
+          "cue": [
+            {
+              "type": "condition",
+              "text": "お客様の会計が終わったら"
+            }
+          ],
+          "kaya": [
+            {
+              "type": "say",
+              "text": "「本日のスペシャルゲストをご紹介します！」"
+            }
+          ],
+          "toushin": [
+            {
+              "type": "action",
+              "text": "BGMを切り替える"
+            }
+          ],
+          "note": ""
+        }
+      ]
+    },
+    "macros": [
+      {
+        "id": "m-1",
+        "title": "導入コール(かや)",
+        "role": "かや",
+        "body": "/yell 本日の主役は <t> さん！\n/wait 2\n/s おめでとうございます♡",
+        "note": ""
+      }
+    ],
+    "prep": [
+      "ダーツを用意"
+    ],
+    "postNote": ""
+  }
+}

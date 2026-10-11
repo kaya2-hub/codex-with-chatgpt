@@ -71,8 +71,9 @@ try {
   await step("顧客一覧: 来店回数・DMリンク・Verスタンプ(14(0/7・到達2回分)形式)・店舗表示。候補は合算しない", async () => {
     await nav("顧客"); await page.fill("#q", "alpha");
     const row = page.locator(".crow", { hasText: "Test Alpha" }).first(); const t = await row.innerText();
-    assert.match(t, /14回/); assert.match(t, /14\(0\/7・到達2回分\)/); assert.match(t, /ダイナー/); assert.ok(await row.locator('a:has-text("DMを開く")').count() === 1);
-    assert.ok(!/18回/.test(t), "候補の常若亭来店を合算していない");
+    // ダイナー14+確認済みの常若亭3(同営業回は1回)=17回
+    assert.match(t, /17回/); assert.match(t, /14\(0\/7・到達2回分\)/); assert.match(t, /ダイナー/); assert.ok(await row.locator('a:has-text("DMを開く")').count() === 1);
+    await page.fill("#q", "same name"); assert.match(await page.locator(".crow", { hasText: "Same Name" }).first().innerText(), /2回/); // 未確認の同名候補の常若亭来店(1件)は合算しない
     await page.fill("#q", "delta"); assert.match(await page.locator(".crow", { hasText: "Test Delta" }).first().innerText(), /DMなし/);
   });
   await step("顧客一覧: 店舗データの読込失敗は「0回」ではなく「読込失敗」と表示", async () => {
@@ -123,7 +124,7 @@ try {
     await grp.locator("summary").first().click(); assert.equal(await grp.evaluate(e => e.open), false); // 折り畳み
     const body = "/yell <t>さん！\n\n/s ♡全角　スペース\n/wait 2\n";
     await act("edopen", '[data-type="macro"][data-item="new"]'); await page.fill("#sd-title", "手動追加"); await page.selectOption("#sd-role", "Toushin"); await page.fill("#sd-body", body); await act("edsave");
-    await page.waitForFunction(() => document.body.innerText.includes("手動追加")); assert.match(await page.innerText("#view"), /トーシンのマクロ/);
+    await page.waitForFunction(() => document.body.innerText.includes("トーシンのマクロ"));
     const tg = page.locator('details[data-open-key^="g:"]').nth(1); if (!(await tg.evaluate(e => e.open))) await tg.locator("summary").first().click();
     const mac = tg.locator("details").first(); if (!(await mac.evaluate(e => e.open))) await mac.locator("summary").first().click();
     await mac.locator('[data-act="mcopy"]').click(); assert.equal(await page.evaluate(() => navigator.clipboard.readText()), body);

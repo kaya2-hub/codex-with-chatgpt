@@ -320,7 +320,7 @@ let composing = false;
 document.addEventListener("compositionstart", () => { composing = true; });
 document.addEventListener("compositionend", e => { composing = false; if (e.target.matches?.("input[type=search][data-act]")) ACTIONS[e.target.dataset.act]({}); });
 document.addEventListener("input", e => { if (composing) return; const t = e.target; if (t.matches("input[type=search][data-act]")) ACTIONS[t.dataset.act]({}); });
-document.addEventListener("change", e => { const t = e.target; if (t.matches("select[data-act],input[type=date][data-act],textarea[data-act]")) ACTIONS[t.dataset.act]({}); });
+document.addEventListener("change", e => { const t = e.target; if (t.matches("select[data-act],input[type=date][data-act],input[type=file][data-act],textarea[data-act]")) ACTIONS[t.dataset.act]({}); });
 
 (async () => {
   try {

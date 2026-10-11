@@ -1,3 +1,4 @@
+import { after } from "node:test";
 import { MemoryStore } from "../store/memory-store.js";
 import { dryRun, applyPlan } from "../tools/migrate-lib.js";
 import { syntheticShops } from "../fixtures/synthetic.js";
@@ -7,12 +8,15 @@ export async function freshStore() {
   const store = process.env.FIRESTORE_EMULATOR_HOST ? await emulatorStore() : new MemoryStore();
   return store;
 }
-let n = 0;
+let n = 0; const apps = [];
+// エミュレータ接続を必ず閉じる(開いたままだとテストプロセスが終了せず、ランナーが正常終了しない)
+after(async () => { if (!apps.length) return; const fs = await import("firebase/firestore"); const { deleteApp } = await import("firebase/app"); for (const a of apps) { try { await fs.terminate(fs.getFirestore(a)); await deleteApp(a); } catch { /* 既に閉じている */ } } apps.length = 0; });
 export async function emulatorStore() {
   const { initializeApp } = await import("firebase/app");
   const fs = await import("firebase/firestore");
   const { FirestoreStore } = await import("../store/firestore-store.js");
   const app = initializeApp({ projectId: "demo-ff14rp" }, `t${Date.now()}${n++}`);
+  apps.push(app);
   const db = fs.getFirestore(app);
   const [h, p] = process.env.FIRESTORE_EMULATOR_HOST.split(":");
   fs.connectFirestoreEmulator(db, h, Number(p));

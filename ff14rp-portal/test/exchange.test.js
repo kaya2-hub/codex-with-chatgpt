@@ -165,3 +165,9 @@ test("セレモニー原稿: ChatGPT取り込みで作成でき、完成/実施�
   assert.equal((await store.get(M.ceremonyScripts, r.id)).scriptStatus, "complete"); // 取り込みで完成状態は変わらない
   assert.equal((await previewImport(store, "ceremony", { ...src, target: { personId: "nobody", stampValue: 7 } })).ok, false);
 });
+
+import fs from "node:fs"; import path from "node:path";
+import { outputs } from "../tools/gen-spec-docs.mjs";
+test("docs/samples(仕様書・サンプルJSON)がコードと一致している(node tools/gen-spec-docs.mjs で再生成)", () => {
+  for (const [f, t] of Object.entries(outputs())) assert.equal(fs.readFileSync(path.join("docs", f), "utf8"), t, `${f} が古い`);
+});

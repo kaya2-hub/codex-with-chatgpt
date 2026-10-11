@@ -13,7 +13,8 @@ const root = process.env.PLAYWRIGHT_BROWSERS_PATH || "/opt/pw-browsers";
 const dir = fs.readdirSync(root).find(d => d.startsWith("chromium")) ;
 const exe = fs.existsSync(`${root}/chromium`) ? `${root}/chromium` : (fs.existsSync(`${root}/${dir}/chrome-linux/chrome`) ? `${root}/${dir}/chrome-linux/chrome` : undefined);
 let browser, fails = 0;
-const step = async (name, fn) => { try { await fn(); console.log("PASS", name); } catch (e) { fails++; console.log("FAIL", name, "\n ", e.message.split("\n")[0]); } };
+const step = async (name, fn) => { try { await fn(); console.log("PASS", name); } catch (e) { fails++; console.log("FAIL", name, "\n ", e.stack || e.message); } };
+const lf = text => text.replace(/\r\n/g, "\n");
 try {
   browser = await chromium.launch({ executablePath: exe, args: ["--no-sandbox"] });
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 }, permissions: ["clipboard-read", "clipboard-write"] });
@@ -120,14 +121,14 @@ try {
     const grp = page.locator('details[data-open-key^="g:"]').first(); assert.match(await grp.locator("summary").first().innerText(), /かやのマクロ/);
     await grp.locator("summary").first().click(); assert.equal(await grp.evaluate(e => e.open), true);
     const one = grp.locator("details").first(); await one.locator("summary").first().click(); assert.equal(await one.evaluate(e => e.open), true);
-    await one.locator('[data-act="mcopy"]').click(); const clip = await page.evaluate(() => navigator.clipboard.readText()); assert.equal(clip, sampleEvent().event.macros[0].body);
+    await one.locator('[data-act="mcopy"]').click(); const clip = await page.evaluate(() => navigator.clipboard.readText()); assert.equal(lf(clip), sampleEvent().event.macros[0].body);
     await grp.locator("summary").first().click(); assert.equal(await grp.evaluate(e => e.open), false); // 折り畳み
     const body = "/yell <t>さん！\n\n/s ♡全角　スペース\n/wait 2\n";
     await act("edopen", '[data-type="macro"][data-item="new"]'); await page.fill("#sd-title", "手動追加"); await page.selectOption("#sd-role", "Toushin"); await page.fill("#sd-body", body); await act("edsave");
     await page.waitForFunction(() => document.body.innerText.includes("トーシンのマクロ"));
     const tg = page.locator('details[data-open-key^="g:"]').nth(1); if (!(await tg.evaluate(e => e.open))) await tg.locator("summary").first().click();
     const mac = tg.locator("details").first(); if (!(await mac.evaluate(e => e.open))) await mac.locator("summary").first().click();
-    await mac.locator('[data-act="mcopy"]').click(); assert.equal(await page.evaluate(() => navigator.clipboard.readText()), body);
+    await mac.locator('[data-act="mcopy"]').click(); assert.equal(lf(await page.evaluate(() => navigator.clipboard.readText())), body);
     const long = Array.from({ length: 16 }, (_, i) => `/s ${i}`).join("\n");
     await mac.locator('[data-act="edopen"]').click(); await page.fill("#sd-body", long); await act("edsave"); await page.waitForFunction(() => document.body.innerText.includes("15行"));
     assert.ok((await page.innerText("#view")).includes("/s 15")); // 警告のみで削除しない
@@ -143,7 +144,7 @@ try {
   });
   await step("イベント: 編集用データをコピー→ChatGPTで変更したJSONを差分更新(チェックした変更だけ反映)", async () => {
     await page.click('[data-act="evtab"][data-v="overview"]'); await act("exedit"); await act("exportcopy");
-    const pkg = await page.evaluate(() => navigator.clipboard.readText()); assert.match(pkg, /現在のデータ/); assert.match(pkg, /"_base"/);
+    const pkg = lf(await page.evaluate(() => navigator.clipboard.readText())); assert.match(pkg, /現在のデータ/); assert.match(pkg, /"_base"/);
     const json = JSON.parse(pkg.match(/```json\n([\s\S]*?)\n```/g).at(-1).replace(/```json\n|\n```/g, ""));
     json.event.timeline.steps[1].time = "22:50(5分早め)"; json.event.venue = "地下 円卓(変更)";
     await page.fill("#imtext", JSON.stringify(json)); await act("imcheck"); await page.waitForSelector('[data-act="imcommit"]');
@@ -182,7 +183,7 @@ try {
     const pre = await page.innerText("#tplprev");
     assert.match(pre, /Test Gammaさん/); assert.match(pre, /7スタンプ/);
     await act("copytext");
-    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), await page.evaluate(() => document.getElementById("tplprev").textContent));
+    assert.equal(lf(await page.evaluate(() => navigator.clipboard.readText())), await page.evaluate(() => document.getElementById("tplprev").textContent));
     assert.equal(await page.locator(".tag:has-text('7:到達済み未実施')").count() >= 1, true);
     await act("perform", '[data-st="done"]');
     await page.waitForFunction(() => document.body.innerText.includes("実施済み"));

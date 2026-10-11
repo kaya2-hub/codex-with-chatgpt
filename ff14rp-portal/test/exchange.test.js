@@ -169,7 +169,7 @@ test("セレモニー原稿: ChatGPT取り込みで作成でき、完成/実施�
 import fs from "node:fs"; import path from "node:path";
 import { outputs } from "../tools/gen-spec-docs.mjs";
 test("docs/samples(仕様書・サンプルJSON)がコードと一致している(node tools/gen-spec-docs.mjs で再生成)", () => {
-  for (const [f, t] of Object.entries(outputs())) assert.equal(fs.readFileSync(path.join("docs", f), "utf8"), t, `${f} が古い`);
+  for (const [f, t] of Object.entries(outputs())) assert.equal(fs.readFileSync(path.join("docs", f), "utf8").replace(/\r\n/g, "\n"), t, `${f} が古い`);
 });
 
 test("[監査] 新規IDの衝突は競合/ベースなしの削除は既定オフ/timelineのsteps省略は拒否/ID衝突の誤判定なし", async () => {

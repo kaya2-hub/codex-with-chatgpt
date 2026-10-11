@@ -1,0 +1,9 @@
+node_modules/
+private/
+*.jsonl
+*.jsonl.gz
+*.sha256
+web/portal-config.js
+out/
+.firebase/
+dist/

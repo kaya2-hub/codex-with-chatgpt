@@ -1,0 +1,20 @@
+{
+  "name": "ff14rp-portal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FF14 RP店舗総合DBポータル(共通顧客台帳/イベント/セレモニー)。店舗原記録は読み取り専用。",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:emu": "firebase emulators:exec --only firestore --project demo-ff14rp \"node --test --test-concurrency=1 test/*.test.js\"",
+    "test:e2e": "node test/e2e/run.mjs",
+    "build": "node tools/build-web.mjs",
+    "serve": "node tools/serve.mjs",
+    "migrate:demo": "node tools/migrate.mjs plan --demo"
+  },
+  "devDependencies": {
+    "firebase": "10.14.1",
+    "firebase-tools": "13.35.1",
+    "playwright-core": "^1.49.1"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "_comment": "ポータル専用Hostingサイトのテンプレート。既存2店舗のhosting/rulesは上書きしない。新しいサイト作成は課金/権限の判断が必要なため、承認後に使用。",
+  "hosting": {
+    "public": "dist",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "headers": [{ "source": "**/*.@(js|html)", "headers": [{ "key": "Cache-Control", "value": "no-cache, max-age=0, must-revalidate" }] }]
+  }
+}

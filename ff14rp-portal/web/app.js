@@ -28,7 +28,7 @@ const STATUS_JA = { draft: "下書き", scheduled: "開催予定", postponed: "�
 
 function toast(msg, bad = false) { const t = $("#toast"); t.textContent = msg; t.style.background = bad ? "#8a1c14" : "#333"; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), bad ? 6000 : 2500); }
 // 失敗時は入力内容を消さない(競合のときだけ最新を読み直す)
-async function run(fn, okMsg, clearIds = []) { S.clear = new Set(clearIds); try { await fn(); if (okMsg) toast(okMsg); await refresh(); } catch (e) { console.warn(e); const conflict = e.code === "conflict"; toast(conflict ? `競合: ${e.message}(最新を読み込みました。内容を確認して再度保存してください)` : `失敗: ${e.message}`, true); if (conflict) { try { await refresh(); } catch {} } } }
+async function run(fn, okMsg, clearIds = []) { if (S.busy) return; S.busy = true; S.clear = new Set(clearIds); try { await fn(); if (okMsg) toast(okMsg); await refresh(); } catch (e) { console.warn(e); const conflict = e.code === "conflict"; toast(conflict ? `競合: ${e.message}(最新を読み込みました。内容を確認して再度保存してください)` : `失敗: ${e.message}`, true); if (conflict) { try { await refresh(); } catch {} } } finally { S.busy = false; } }
 async function refresh() { S.d = await loadAll(S.boot); render(); }
 
 const chars = pid => S.d.characters.filter(c => c.personId === pid);
@@ -169,7 +169,7 @@ function vOcc(o) {
   return `<div class="row"><a href="#" data-act="openev" data-id="">← 一覧</a></div>
   <div class="card"><h2>${h(doc.name)} <span class="tag">${STATUS_JA[o.status]}</span> <span class="tag ${h(o.store)}">${h(o.store === "diner" ? "ダイナー" : o.store === "toko" ? "常若亭" : "共通")}</span></h2>
    <div class="row"><button class="b pri" data-act="exedit" data-id="${h(o.id)}">ChatGPTで編集</button>${next.map(s => `<button class="b" data-act="status" data-id="${h(o.id)}" data-rev="${o.revision}" data-to="${s}">→ ${STATUS_JA[s]}</button>`).join("")}<button class="b" data-act="dup" data-id="${h(o.id)}">複製して新しい下書きを作る</button></div>
-   ${o.status === "held" ? '<p class="mut">開催済み: 編集した場合は編集前の内容が履歴に残ります</p>' : ""}${o.copiedFrom ? '<p class="mut">過去の開催回から複製</p>' : ""}${o.timelineLegacy ? '<p class="mut">旧形式のタイムラインは新形式へ変換済み(元の内容は退避して保持しています)</p>' : ""}</div>
+   ${o.status === "held" ? '<p class="mut">開催済み: 編集した場合は編集前の内容が履歴に残ります</p>' : ""}${o.copiedFrom ? '<p class="mut">過去の開催回から複製</p>' : ""}${o.timelineLegacy ? `<details class="mut"><summary>旧形式のタイムライン(変換前の内容を退避して保持しています)</summary><pre class="macro">${h(o.timelineLegacy.sourceText || JSON.stringify(o.timelineLegacy, null, 1))}</pre></details>` : ""}</div>
   ${S.exOpen === o.id ? ui.vExchange("event", o.id) : ""}
   <div class="tabs">${tabs.map(([k, t]) => `<button class="b" role="tab" data-act="evtab" data-v="${k}" aria-selected="${S.evTab === k}">${t}</button>`).join("")}</div>
   ${S.evTab === "overview" ? ui.vFields("event", o.id, doc, ["name", "store", "date", "startTime", "endTime", "venue", "overview", "plan", "memo"]) : ""}
@@ -249,6 +249,7 @@ function vArchive() {
 // ---------- 描画/イベント ----------
 const viewKey = () => [S.view, S.pid, S.evId, S.evTab].join("|");
 function render() {
+  S.ed && ui.readDraft(); // 編集中の入力は再描画の前に必ずドラフトへ取り込む
   // 同じ画面の再描画では、入力中の値(未保存を含む)を保持する。画面が変わったら破棄。
   const key = viewKey(), typed = {};
   if (S.lastKey === key) document.querySelectorAll("#view [id]").forEach(el => { if (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && !S.clear?.has(el.id) && !/^(sd-|imfile)/.test(el.id)) typed[el.id] = el.value; });
@@ -288,7 +289,7 @@ const ACTIONS = {
   mkmaster: () => run(async () => { if (!val("mname").trim()) throw new Error("イベント名が必要です"); await Ev.createMaster(S.boot.store, { name: val("mname"), store: val("mstore") || null }); }, "追加しました", ["mname"]),
   mkocc: d => run(async () => { S.evId = await Ev.createOccurrence(S.boot.store, d.id, { date: val("od-" + d.id) || null }); S.evTab = "overview"; }, "開催回を作成しました"),
   openev: d => { S.view = "events"; S.evId = d.id || null; S.evTab = d.tab || "overview"; S.tl = null; render(); },
-  evtab: d => { S.evTab = d.v; render(); },
+  evtab: d => { if (ui.dirtyFields() && !confirm("保存していない入力があります。破棄して移動しますか?")) return; S.evTab = d.v; render(); },
   status: d => run(() => Ev.setStatus(S.boot.store, d.id, d.to, Number(d.rev), L()), "状態を変更しました"),
   dup: d => run(async () => { S.evId = await Ev.duplicateOccurrence(S.boot.store, d.id); S.view = "events"; S.evTab = "overview"; }, "複製しました(新しい下書き)"),
   copytext: () => copy(document.getElementById("tplprev").textContent),

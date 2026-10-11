@@ -1,7 +1,7 @@
 // ChatGPT連携の共通基盤: 取り込みJSONの検証・書き出し・差分(3者比較)・適用。イベントとセレモニーで共通。
 // ChatGPTが作るJSONは「原稿」にすぎず、来店記録・Ver判定・実施記録・開催状態には一切触れない(取り込める項目を限定)。
 import { PortalError, hashOf, stable, clone, isHttpUrl, nowIso, clean } from "./util.js";
-import { normRole } from "./roles.js";
+import { normRole, roleJa } from "./roles.js";
 import { ITEM_TYPES } from "./timeline.js";
 import { KINDS, normalizeDoc, canon, canonItem, listOf, newItemId } from "./docs.js";
 
@@ -13,6 +13,8 @@ const MAXTEXT = 20000;
 const FIELD_KEY = { event: { memo: "retrospective" }, ceremony: {} };
 const BODY = { event: "event", ceremony: "ceremony" };
 
+const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const validBase = b => isObj(b) && isObj(b.fields) && isObj(b.items) && Object.values(b.items).every(isObj) && (b.order === undefined || (isObj(b.order) && Object.values(b.order).every(Array.isArray))) && (b.revision === undefined || Number.isInteger(b.revision));
 class Report {
   constructor() { this.errors = []; this.warnings = []; }
   err(path, message) { this.errors.push({ path, message }); }
@@ -76,7 +78,7 @@ const FIELD_RULES = {
   event: {
     name: (r, p, v) => str(r, p, v, { required: true, max: 200 }),
     store: (r, p, v) => { if (v === null || v === "") return null; if (!["diner", "toko"].includes(v)) { r.err(p, "店舗は diner / toko / null のいずれか"); return undefined; } return v; },
-    date: (r, p, v) => { if (v === null || v === "") return null; if (typeof v !== "string" || !DATE.test(v) || Number.isNaN(Date.parse(v))) { r.err(p, "日付は YYYY-MM-DD 形式、未定なら null"); return undefined; } return v; },
+    date: (r, p, v) => { if (v === null || v === "") return null; if (typeof v !== "string" || !DATE.test(v) || Number.isNaN(Date.parse(v)) || new Date(`${v}T00:00:00Z`).toISOString().slice(0, 10) !== v) { r.err(p, "日付は YYYY-MM-DD 形式、未定なら null"); return undefined; } return v; },
     startTime: (r, p, v) => str(r, p, v, { max: 80 }), endTime: (r, p, v) => str(r, p, v, { max: 80 }), venue: (r, p, v) => str(r, p, v, { max: 500 }),
     overview: (r, p, v) => str(r, p, v), plan: (r, p, v) => str(r, p, v), memo: (r, p, v) => str(r, p, v)
   },
@@ -119,10 +121,15 @@ export function validateImport(input, expectedKind) {
   for (const f of k.items) if (f in body) { const v = vList(r, `${BODY[kind]}.${f}`, body[f], 300, itemRule[f]); if (v) data[f] = v; }
   if ("timeline" in body) {
     const t = body.timeline; if (!isObj(t)) r.err(`${BODY[kind]}.timeline`, "オブジェクト(steps配列を持つ)で指定してください");
-    else { unknownKeys(r, `${BODY[kind]}.timeline`, t, ["version", "steps"]); const v = vList(r, `${BODY[kind]}.timeline.steps`, t.steps ?? [], 500, vStep); if (v) data.steps = v; }
+    else {
+      unknownKeys(r, `${BODY[kind]}.timeline`, t, ["version", "steps"]);
+      if (t.version !== undefined && t.version !== 2) r.err(`${BODY[kind]}.timeline.version`, "タイムラインの形式バージョンは 2");
+      if (!("steps" in t)) r.err(`${BODY[kind]}.timeline.steps`, "steps が必要です(省略すると全削除と区別できないため)");
+      else { const v = vList(r, `${BODY[kind]}.timeline.steps`, t.steps, 500, vStep); if (v) data.steps = v; }
+    }
   }
   let base = null;
-  if (j._base !== undefined) { if (isObj(j._base) && isObj(j._base.fields) && isObj(j._base.items)) base = j._base; else r.err("_base", "_base は書き出し時の値をそのまま残してください"); }
+  if (j._base !== undefined) { if (validBase(j._base)) base = j._base; else r.err("_base", "_base が壊れています。書き出し時の値をそのまま残してください(または _base を削除)"); }
   if (!r.errors.length && op === "update" && !Object.keys(data).length) r.warn(BODY[kind], "更新する項目がありません");
   return { ok: !r.errors.length, kind, op, target, base, data, errors: r.errors, warnings: r.warnings };
 }
@@ -153,7 +160,7 @@ export function exportDoc(kind, raw, { target, facts } = {}) {
 
 // ---------- 差分(3者比較) ----------
 const labelField = (kind, f) => ({ name: "イベント名", store: "店舗", date: "開催日", startTime: "開始", endTime: "終了", venue: "会場", overview: "概要", plan: "企画内容", memo: "振り返り・メモ", characterName: "当日の呼称", content: "セレモニー内容", thanks: "個別の感謝コメント", postNote: "実施後メモ", prep: "準備事項", cautions: "注意事項", staff: "担当・役割", macros: "マクロ", materials: "資料", steps: "タイムライン" }[f] ?? f);
-const itemTitle = (key, x) => key === "steps" ? `${x.time || "(時刻未定)"} ${x.phase || ""}`.trim() : key === "macros" ? `${x.title}(${x.role})` : key === "materials" ? x.label || x.url : `${x.role}: ${x.duty}`.slice(0, 40);
+const itemTitle = (key, x) => key === "steps" ? `${x.time || "(時刻未定)"} ${x.phase || ""}`.trim() : key === "macros" ? `${x.title}(${roleJa(x.role)})` : key === "materials" ? x.label || x.url : `${roleJa(x.role)}: ${x.duty}`.slice(0, 40);
 
 /**
  * 取り込み(data=検証済みの指定項目)と現在値の差を、項目単位の変更リストにする。
@@ -182,8 +189,11 @@ export function planImport(kind, currentRaw, data, base) {
     const incMap = new Map(inc.map(x => [x.id, x])); const bItems = base?.items?.[f]; const bOrder = base?.order?.[f];
     for (const x of inc) {
       const c = curMap.get(x.id);
-      if (!c) { const wasInBase = bItems && x.id in bItems; changes.push({ key: `add:${f}:${x.id}`, kind: "item-add", area: f, itemId: x.id, label: `${labelField(kind, f)}を追加`, title: itemTitle(f, x), before: null, after: x, conflict: !!wasInBase, reason: wasInBase ? "他の人が削除した項目です" : undefined }); continue; }
+      if (!c) { const wasInBase = bItems && hasOwn(bItems, x.id); changes.push({ key: `add:${f}:${x.id}`, kind: "item-add", area: f, itemId: x.id, label: `${labelField(kind, f)}を追加`, title: itemTitle(f, x), before: null, after: x, conflict: !!wasInBase, reason: wasInBase ? "他の人が削除した項目です" : undefined }); continue; }
       if (stable(c) === stable(x)) continue;
+      if (bItems && !hasOwn(bItems, x.id)) { // 書き出し後に他の人が同じIDで追加していた(新規IDの衝突)
+        changes.push({ key: `edit:${f}:${x.id}`, kind: "item-edit", area: f, itemId: x.id, label: `${labelField(kind, f)}を変更`, title: itemTitle(f, x), before: c, after: x, conflict: true, reason: "同じIDの項目を、他の人も追加しています(ID衝突)" }); continue;
+      }
       const bh = bItems?.[x.id];
       if (bh !== undefined && hashOf(x) === bh) continue; // ChatGPTは未変更
       const conflict = bh !== undefined && hashOf(c) !== bh;
@@ -191,9 +201,10 @@ export function planImport(kind, currentRaw, data, base) {
     }
     for (const c of curList) {
       if (incMap.has(c.id)) continue;
-      if (bItems && !(c.id in bItems)) { notes.push(`「${itemTitle(f, c)}」は書き出し後に他の人が追加したため残します`); continue; }
+      if (bItems && !hasOwn(bItems, c.id)) { notes.push(`「${itemTitle(f, c)}」は書き出し後に他の人が追加したため残します`); continue; }
       const conflict = !!bItems && hashOf(c) !== bItems[c.id];
-      changes.push({ key: `remove:${f}:${c.id}`, kind: "item-remove", area: f, itemId: c.id, label: `${labelField(kind, f)}を削除`, title: itemTitle(f, c), before: c, after: null, conflict, reason: conflict ? "他の人が編集した項目を、ChatGPTは削除しています" : undefined });
+      // ベース情報なしの削除は意図した削除か判別できないため、既定ではチェックしない
+      changes.push({ key: `remove:${f}:${c.id}`, kind: "item-remove", area: f, itemId: c.id, label: `${labelField(kind, f)}を削除`, title: itemTitle(f, c), before: c, after: null, conflict, defaultOff: !bItems, reason: conflict ? "他の人が編集した項目を、ChatGPTは削除しています" : !bItems ? "ベース情報(_base)がないため、既定では削除しません。削除してよい場合のみチェックしてください" : undefined });
     }
     // 並べ替え(共通する項目だけで比較)
     const common = curList.filter(x => incMap.has(x.id)).map(x => x.id); const incCommon = inc.filter(x => curMap.has(x.id)).map(x => x.id);
@@ -207,7 +218,7 @@ export function planImport(kind, currentRaw, data, base) {
 
 /** 変更リストのうち採用するもの(decisions[key]===true。未指定はcleanなら採用、conflictなら現在値を維持)を適用した「書込み用patch」を返す。 */
 export function applyPlan(kind, currentRaw, data, plan, decisions = {}) {
-  const k = KINDS[kind]; const cur = normalizeDoc(kind, currentRaw); const patch = {}; const chosen = c => (c.key in decisions ? !!decisions[c.key] : !c.conflict);
+  const k = KINDS[kind]; const cur = normalizeDoc(kind, currentRaw); const patch = {}; const chosen = c => (c.key in decisions ? !!decisions[c.key] : !c.conflict && !c.defaultOff);
   const fieldsApplied = [];
   for (const c of plan.changes) if (c.kind === "field" && chosen(c)) { patch[c.area] = c.after; fieldsApplied.push(c.area); }
   for (const f of [...k.items, "steps"]) {

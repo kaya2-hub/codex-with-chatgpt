@@ -58,3 +58,29 @@
 | 16組の本人確認 | USER | 画面を完成(判断材料: 来店数/最終来店/旧名/備考DMの有無)。確定は利用者のみ |
 | PowerShell 5.1 互換 | PASS(静的)/ PC(実行) | BOM+CRLF・5.1非互換構文なし・`npx.cmd`。Windowsでの実行は未検証 |
 | Windows引数引用 | PASS(単体) | shellArgs。Windows実行は未検証 |
+
+## ChatGPT連携・イベント/セレモニー改修(第3回)
+| ID | 判定 | 証拠 |
+|---|---|---|
+| GPT-01 イベント用の仕様書をコピーできる | PASS | exchange.test(必須内容を含む)、e2e(クリップボードに`ff14rp.event`・「これでOK」・22:55頃の実例) |
+| GPT-02 セレモニー用の仕様書をコピーできる | PASS | exchange.test、e2e(`ff14rp.ceremony`・実施済みの注意) |
+| GPT-03 各仕様書のJSONを正常に取り込める | PASS | exchange.test(サンプル検証・往復)、e2e(貼り付け/ファイルアップロード) |
+| GPT-04 不足・形式不正・不明バージョンを保存せず拒否(場所を表示) | PASS | exchange.test(スキーマ違反10種・壊れた`_base`・実在しない日付・steps省略)、e2e |
+| GPT-05 イベント全体を一括新規登録(下書き) | PASS | exchange.test、e2e |
+| GPT-06 既存イベントのJSON差分更新(選択適用) | PASS | exchange.test、e2e(チェックを外した変更は反映されない) |
+| GPT-07 アプリで一箇所編集しても他は変わらない | PASS | exchange.test(項目単位)、e2e(他ステップのDOM完全一致)、savefieldsは「画面に出した値から変えた項目だけ」 |
+| GPT-08 再エクスポート→再取り込みで差分なし | PASS | exchange.test |
+| GPT-09 別々の利用者の編集の競合検知 | PASS | exchange.test(`_base`3者比較・ID衝突・他者追加の保持・他者編集項目の削除=競合・プレビュー後の更新拒否)、手動編集はbaseHash |
+| GPT-10 複雑な会話劇・時刻・キャラチェンジを保持 | PASS | exchange.test(22:55頃/23時になったら・複数行動・change種別)、e2e |
+| GPT-11 マクロ原文・改行・コマンド完全一致 | PASS | exchange.test、e2e(コピーが`/yell <t>…\n\n/wait`と完全一致、15行超は警告のみ) |
+| GPT-12 かや/トーシンの表示名 | PASS | roles(表記ゆれ)、e2e(画面にKaya/Toushinが出ない) |
+| GPT-13 担当者別マクロを折り畳める(グループ・個別) | PASS | e2e |
+| GPT-14 顧客一覧の来店回数・DM・Verスタンプ | PASS | e2e(`17回`・`14(0/7・到達2回分)`・DMを開く/DMなし・候補は合算しない・`?fail=diner`で読込失敗表示) |
+| GPT-15 セレモニー原稿を作っても実施済み/完成にならない | PASS | exchange.test、e2e(取り込み後も`7:到達済み未実施`) |
+| GPT-16 Ver判定・過去の実施記録が変わらない | PASS | exchange.test(取り込み前後で実施記録・Personが同一)、isolated(店舗アプリ回帰) |
+| GPT-17 既存のイベント/マクロ/タイムラインに欠落なし | PASS | exchange.test(旧3列/未分類/IDなしマクロ/memo→新形式・`timelineLegacy`退避)、複製の全項目コピー、開催済み編集の前内容履歴 |
+| GPT-18 本番接続なしのデモで一連の操作 | PASS | `npm run serve`(デモ)・e2e |
+| 旧機能の撤去 | PASS | Notion貼り付けUI・ルールベース3列分類UIを撤去。旧データは変換して閲覧/編集可 |
+| 「仮設定」表記の修正 | PASS | セレモニー画面は「7スタンプごと(確定仕様)」 |
+| 取り込み先の取り違え防止 | PASS | exchange.test(別イベントのJSON・新規画面へのupdate・別原稿) |
+| エミュレータ統合テストの正常終了 | PASS(Linux)/ PC(Windows) | テストが接続を閉じるため、`test:emu` が約25秒で終了コード0。Windowsでの確認は未実施 |

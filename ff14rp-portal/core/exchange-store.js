@@ -9,9 +9,17 @@ import { STAMP_UNIT } from "./aggregate.js";
 export const scriptId = (personId, stampValue) => `script__${personId}__${stampValue}`;
 
 /** 検証+既存データとの照合。保存はしない(プレビュー用)。 */
-export async function previewImport(store, kind, input) {
+export async function previewImport(store, kind, input, scope) {
   const v = validateImport(input, kind);
   if (!v.ok) return { ...v, mode: null };
+  // 開いている画面(scope)と、JSONが指す取り込み先が違えば拒否(別のデータを誤って更新しない)
+  const bad = (path, message) => ({ ...v, ok: false, errors: [{ path, message }], mode: null });
+  if (scope !== undefined) {
+    if (kind === "event") {
+      if (scope === "new" && v.op !== "create") return bad("op", "新規作成の画面です。op は create にしてください(既存の更新は、そのイベントの画面から)");
+      if (scope !== "new" && (v.op !== "update" || v.target?.occurrenceId !== scope)) return bad("target.occurrenceId", "このイベントの更新用データではありません(別のイベントのJSONの可能性)。このイベントの「編集用データをコピー」から作ったJSONを使ってください");
+    } else if (scriptId(v.target.personId, v.target.stampValue) !== scope) return bad("target", "この原稿(お客様・達成スタンプ)用のJSONではありません。画面の「仕様書をコピー」/「編集用データをコピー」から作ったJSONを使ってください");
+  }
   const col = KINDS[kind].col;
   if (kind === "event") {
     if (v.op === "create") return { ...v, mode: "create" };

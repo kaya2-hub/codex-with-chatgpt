@@ -171,3 +171,43 @@ import { outputs } from "../tools/gen-spec-docs.mjs";
 test("docs/samples(仕様書・サンプルJSON)がコードと一致している(node tools/gen-spec-docs.mjs で再生成)", () => {
   for (const [f, t] of Object.entries(outputs())) assert.equal(fs.readFileSync(path.join("docs", f), "utf8"), t, `${f} が古い`);
 });
+
+test("[監査] 新規IDの衝突は競合/ベースなしの削除は既定オフ/timelineのsteps省略は拒否/ID衝突の誤判定なし", async () => {
+  const store = await freshStore(); const { id } = await importEvent(store, sampleEvent());
+  const raw0 = await store.get(M.eventOccurrences, id);
+  const a = exportDoc("event", { ...raw0, id }), b = exportDoc("event", { ...raw0, id });
+  a.event.macros.push({ id: "m-2", title: "Aが追加", role: "かや", body: "/s A" }); b.event.macros.push({ id: "m-2", title: "Bが追加", role: "トーシン", body: "/s B" });
+  await commitImport(store, "event", await previewImport(store, "event", a), {});
+  const pb = await previewImport(store, "event", b); const ch = pb.plan.changes.find(c => c.key === "edit:macros:m-2"); assert.equal(ch.conflict, true); assert.match(ch.reason, /ID衝突/);
+  await assert.rejects(() => commitImport(store, "event", pb, {}), e => e.code === "nothing"); assert.equal((await store.get(M.eventOccurrences, id)).macros.find(m => m.id === "m-2").title, "Aが追加"); // 既定は現在値を維持(競合は選ばない限り反映されない)
+  // ベース情報なし: 削除は既定でオフ(チェックしなければ消えない)
+  const nb = { schema: "ff14rp.event", version: 1, op: "update", target: { occurrenceId: id }, event: { macros: [{ title: "これだけ", role: "かや", body: "/s x" }] } };
+  const pn = await previewImport(store, "event", nb); assert.ok(pn.plan.changes.filter(c => c.kind === "item-remove").every(c => c.defaultOff));
+  const before = (await store.get(M.eventOccurrences, id)).macros.length; await commitImport(store, "event", pn, {}); const after = await store.get(M.eventOccurrences, id);
+  assert.equal(after.macros.length, before + 1); // 追加だけ反映され、既存マクロは削除されない
+  assert.equal(validateImport({ ...sampleEvent(), event: { name: "x", timeline: {} } }, "event").ok, false); // steps省略=全削除と区別できないため拒否
+  assert.equal(validateImport({ ...sampleEvent(), event: { ...sampleEvent().event, date: "2026-02-31" } }, "event").ok, false);
+  const badBase = exportDoc("event", { ...after, id }); badBase._base.items = "x"; const vb = validateImport(badBase, "event"); assert.equal(vb.ok, false); assert.ok(vb.errors.some(e => e.path === "_base"));
+  const odd = exportDoc("event", { ...after, id }); odd.event.macros.push({ id: "constructor", title: "t", role: "かや", body: "/s" }); assert.ok((await previewImport(store, "event", odd)).ok);
+});
+test("[監査] 取り込み先の取り違えを拒否(別イベントのJSON/新規画面へのupdate/別原稿)", async () => {
+  const store = await freshStore(); const { id: A } = await importEvent(store, sampleEvent()); const { id: B } = await importEvent(store, { ...sampleEvent(), event: { ...sampleEvent().event, name: "別イベント" } });
+  const forB = exportDoc("event", { ...(await store.get(M.eventOccurrences, B)), id: B });
+  const r1 = await previewImport(store, "event", forB, A); assert.equal(r1.ok, false); assert.match(r1.errors[0].message, /別のイベント/);
+  assert.equal((await previewImport(store, "event", forB, B)).ok, true); assert.equal((await previewImport(store, "event", forB, "new")).ok, false); assert.equal((await previewImport(store, "event", sampleEvent(), A)).ok, false);
+  assert.equal((await previewImport(store, "event", sampleEvent(), "new")).ok, true);
+  const { store: cs } = await migratedStore(); const cj = sampleCeremony(); cj.target = { personId: "person-diner-cus_a", stampValue: 7 };
+  assert.equal((await previewImport(cs, "ceremony", cj, scriptId("person-diner-cus_a", 14))).ok, false); assert.equal((await previewImport(cs, "ceremony", cj, scriptId("person-diner-cus_a", 7))).ok, true);
+});
+test("[監査] 開催済みの編集は編集前の内容を履歴に残す/複製は全項目をコピー/削除は同時編集を検出/未知の担当は保持", async () => {
+  const store = await freshStore(); const { id } = await importEvent(store, sampleEvent());
+  let o = await store.get(M.eventOccurrences, id); await store.batch([{ op: "update", col: M.eventOccurrences, id, expectedRevision: o.revision, data: { status: "held" } }]);
+  const before = (await store.get(M.eventOccurrences, id)).venue; await updateFields(store, "event", id, { venue: "変更後" }, { label: "かや" });
+  const h = (await store.get(M.eventOccurrences, id)).history.at(-1); assert.equal(h.before.venue, before);
+  const { duplicateOccurrence } = await import("../core/events.js"); const d = await store.get(M.eventOccurrences, await duplicateOccurrence(store, id));
+  const src = await store.get(M.eventOccurrences, id); for (const f of ["venue", "startTime", "endTime", "plan", "staff", "prep", "cautions", "macros", "timeline", "materials"]) assert.deepEqual(d[f], src[f], f); assert.equal(d.status, "draft"); assert.equal(d.date, null);
+  const m = normalizeDoc("event", src).macros[0]; await updateItem(store, "event", id, "macros", m.id, { ...m, title: "他者が編集" }, { label: "トーシン" });
+  await assert.rejects(() => updateItem(store, "event", id, "macros", m.id, null, { baseHash: hashOf(m), label: "かや" }), e => e.code === "conflict"); // 古い画面からの削除は拒否
+  await updateItem(store, "event", id, "macros", "legacy-role", { title: "旧", role: "操作者名", body: "/s", note: "" }, { label: "かや" });
+  assert.equal(normalizeDoc("event", await store.get(M.eventOccurrences, id)).macros.find(x => x.id === "legacy-role").role, "操作者名");
+});

@@ -1,6 +1,7 @@
 import { PortalError, clone, nowIso, clean } from "./util.js";
 import { MASTER as M } from "./collections.js";
 import { newId } from "./identity-ops.js";
+import { normalizeDoc } from "./docs.js";
 
 export const STATUSES = ["draft", "scheduled", "postponed", "cancelled", "held"];
 const NEXT = { draft: ["scheduled", "cancelled"], scheduled: ["held", "postponed", "cancelled", "draft"], postponed: ["scheduled", "cancelled"], cancelled: ["draft"], held: [] };
@@ -40,8 +41,9 @@ export async function editOccurrence(store, occId, expectedRevision, patch, { la
 export async function duplicateOccurrence(store, occId) {
   const o = await store.get(M.eventOccurrences, occId);
   if (!o) throw new PortalError("not-found", occId);
-  const id = newId("evo");
-  await store.batch([{ op: "create", col: M.eventOccurrences, id, data: { masterId: o.masterId, masterRevisionAtCopy: o.masterRevisionAtCopy, name: o.name, store: o.store, date: null, status: "draft", overview: o.overview, macros: clone(o.macros), timeline: clone(o.timeline), materials: clone(o.materials), memo: "", history: [], copiedFrom: occId, createdAt: nowIso() } }]);
+  const d = normalizeDoc("event", o); const id = newId("evo");
+  const content = { name: d.name, store: d.store, startTime: d.startTime, endTime: d.endTime, venue: d.venue, overview: d.overview, plan: d.plan, staff: d.staff, prep: d.prep, cautions: d.cautions, macros: d.macros, materials: d.materials, timeline: d.timeline };
+  await store.batch([{ op: "create", col: M.eventOccurrences, id, data: { ...clone(content), ...(o.timelineLegacy ? { timelineLegacy: clone(o.timelineLegacy) } : {}), masterId: o.masterId ?? null, masterRevisionAtCopy: o.masterRevisionAtCopy ?? null, date: null, status: "draft", memo: "", history: [], copiedFrom: occId, createdAt: nowIso() } }]);
   return id;
 }
 /** 表示用。状態は変えない(過去日でもheldにしない)。 */

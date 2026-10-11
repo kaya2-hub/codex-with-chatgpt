@@ -42,7 +42,9 @@ const withList = (o, key, arr) => (key === "steps" ? { timeline: { ...o.timeline
 export async function commitPatch(store, kind, id, cur, patch, label, change, expectedRevision) {
   const k = KINDS[kind]; const data = { ...patch };
   if (patch.timeline && !isV2(cur.timeline) && cur.timeline && !cur.timelineLegacy) data.timelineLegacy = cur.timeline;
-  data.history = [...(cur.history || []), { at: nowIso(), by: clean(label), change, fields: Object.keys(patch) }];
+  const entry = { at: nowIso(), by: clean(label), change, fields: Object.keys(patch) };
+  if (cur.status === "held") entry.before = Object.fromEntries(Object.keys(patch).map(k => [k, clone(cur[k])])); // 開催済みの編集は、編集前の内容も履歴に残す
+  data.history = [...(cur.history || []), entry];
   await store.batch([{ op: "update", col: k.col, id, expectedRevision, data }]);
 }
 async function load(store, kind, id) {
@@ -55,10 +57,11 @@ export async function updateItem(store, kind, id, key, itemId, next, { baseHash,
   const { raw, doc } = await load(store, kind, id);
   const list = [...listOf(doc, key)]; const i = list.findIndex(x => x.id === itemId);
   if (baseHash !== undefined && i >= 0 && hashOf(list[i]) !== baseHash) throw new PortalError("conflict", "他の人が先にこの項目を更新しました。再読込して確認してください");
+  if (baseHash !== undefined && i < 0) throw new PortalError("conflict", "この項目は他の人が先に削除しました。再読込して確認してください");
   if (i < 0 && next === null) throw new PortalError("not-found", "項目がありません(既に削除済み)");
   if (next === null) list.splice(i, 1);
   else if (i >= 0) list[i] = { ...next, id: itemId };
-  else { const at = afterId ? list.findIndex(x => x.id === afterId) + 1 : list.length; list.splice(at, 0, { ...next, id: itemId }); }
+  else { const ai = afterId ? list.findIndex(x => x.id === afterId) : -1; list.splice(ai >= 0 ? ai + 1 : list.length, 0, { ...next, id: itemId }); }
   await commitPatch(store, kind, id, raw, withList(doc, key, list), label, `${next === null ? "remove" : i >= 0 ? "edit" : "add"}:${key}:${itemId}`, raw.revision);
 }
 export async function moveItem(store, kind, id, key, itemId, dir, { label } = {}) {

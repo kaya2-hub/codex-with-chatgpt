@@ -132,6 +132,15 @@ try {
     await mac.locator('[data-act="edopen"]').click(); await page.fill("#sd-body", long); await act("edsave"); await page.waitForFunction(() => document.body.innerText.includes("15行"));
     assert.ok((await page.innerText("#view")).includes("/s 15")); // 警告のみで削除しない
   });
+  await step("イベント: 編集中の入力はタブを切り替えても失われず、別項目を開くときは破棄確認が出る", async () => {
+    await act("edopen", '[data-type="macro"][data-item="new"]'); await page.fill("#sd-title", "下書き中"); await page.fill("#sd-body", "/s 入力途中\n2行目");
+    await page.click('[data-act="evtab"][data-v="timeline"]'); await page.click('[data-act="evtab"][data-v="macros"]');
+    assert.equal(await page.inputValue("#sd-body"), "/s 入力途中\n2行目"); assert.equal(await page.inputValue("#sd-title"), "下書き中");
+    let asked = 0; page.removeAllListeners("dialog"); page.on("dialog", d => { asked++; d.dismiss(); });
+    await page.evaluate(() => document.querySelectorAll("#view details").forEach(d => { d.open = true; }));
+    await page.locator('[data-act="edopen"][data-type="macro"]:not([data-item="new"])').first().click(); assert.equal(asked, 1); assert.equal(await page.inputValue("#sd-title"), "下書き中");
+    page.removeAllListeners("dialog"); page.on("dialog", d => d.accept()); await act("edcancel");
+  });
   await step("イベント: 編集用データをコピー→ChatGPTで変更したJSONを差分更新(チェックした変更だけ反映)", async () => {
     await page.click('[data-act="evtab"][data-v="overview"]'); await act("exedit"); await act("exportcopy");
     const pkg = await page.evaluate(() => navigator.clipboard.readText()); assert.match(pkg, /現在のデータ/); assert.match(pkg, /"_base"/);

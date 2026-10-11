@@ -20,7 +20,7 @@ const $ = s => document.querySelector(s);
 const safeUrl = u => /^https?:\/\/\S+$/i.test(String(u ?? "").trim()) ? String(u).trim() : "";
 const h = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
-const S = { boot: null, d: null, view: "home", edit: false, pid: null, q: "", evId: null, evTab: "overview", cer: {}, arch: {}, open: new Set(), ed: null, imp: null, exOpen: null };
+const S = { boot: null, d: null, view: "home", edit: false, pid: null, q: "", evId: null, evTab: "overview", cer: {}, arch: {}, open: new Set(), shut: new Set(), em: new Set(), ed: null, imp: null, exOpen: null };
 const NAV = [["home", "HOME"], ["customers", "顧客"], ["candidates", "照合候補"], ["cutover", "切替"], ["events", "イベント"], ["ceremony", "セレモニー"], ["archive", "アーカイブ"]];
 const label = () => $("#who").value;
 const val = id => document.getElementById(id)?.value ?? "";
@@ -163,18 +163,20 @@ function vEvents() {
   <details class="card"><summary class="mut">旧: イベントマスター(従来の複製元。既存データの互換のため残しています)</summary>${S.d.masters.map(m => `<div class="row"><b>${h(m.name)}</b><input type="date" id="od-${h(m.id)}" style="max-width:160px"><button class="b" data-act="mkocc" data-id="${h(m.id)}">開催回を作成(複製)</button></div>`).join("") || '<p class="mut">なし</p>'}</details>`;
 }
 function vOcc(o) {
-  const { doc } = ui.docOf("event", o.id);
+  const { doc } = ui.docOf("event", o.id); const edit = ui.isEdit("event", o.id);
   const tabs = [["overview", "基本情報"], ["macros", "マクロ"], ["timeline", "タイムライン"], ["materials", "担当・資料・準備"]];
   const next = { draft: ["scheduled", "cancelled"], scheduled: ["held", "postponed", "cancelled", "draft"], postponed: ["scheduled", "cancelled"], cancelled: ["draft"], held: [] }[o.status];
+  const F = ui.FIELDS.event;
   return `<div class="row"><a href="#" data-act="openev" data-id="">← 一覧</a></div>
   <div class="card"><h2>${h(doc.name)} <span class="tag">${STATUS_JA[o.status]}</span> <span class="tag ${h(o.store)}">${h(o.store === "diner" ? "ダイナー" : o.store === "toko" ? "常若亭" : "共通")}</span></h2>
-   <div class="row"><button class="b pri" data-act="exedit" data-id="${h(o.id)}">ChatGPTで編集</button>${next.map(s => `<button class="b" data-act="status" data-id="${h(o.id)}" data-rev="${o.revision}" data-to="${s}">→ ${STATUS_JA[s]}</button>`).join("")}<button class="b" data-act="dup" data-id="${h(o.id)}">複製して新しい下書きを作る</button></div>
+   <div class="row">${next.map(s => `<button class="b" data-act="status" data-id="${h(o.id)}" data-rev="${o.revision}" data-to="${s}">→ ${STATUS_JA[s]}</button>`).join("")}<button class="b" data-act="dup" data-id="${h(o.id)}">複製して新しい下書きを作る</button></div>
    ${o.status === "held" ? '<p class="mut">開催済み: 編集した場合は編集前の内容が履歴に残ります</p>' : ""}${o.copiedFrom ? '<p class="mut">過去の開催回から複製</p>' : ""}${o.timelineLegacy ? `<details class="mut"><summary>旧形式のタイムライン(変換前の内容を退避して保持しています)</summary><pre class="macro">${h(o.timelineLegacy.sourceText || JSON.stringify(o.timelineLegacy, null, 1))}</pre></details>` : ""}</div>
-  ${S.exOpen === o.id ? ui.vExchange("event", o.id) : ""}
+  ${ui.modeBar("event", o.id, `<button class="b pri" data-act="exedit" data-id="${h(o.id)}">ChatGPTで編集</button>`)}
+  ${edit && S.exOpen === o.id ? ui.vExchange("event", o.id) : ""}
   <div class="tabs">${tabs.map(([k, t]) => `<button class="b" role="tab" data-act="evtab" data-v="${k}" aria-selected="${S.evTab === k}">${t}</button>`).join("")}</div>
-  ${S.evTab === "overview" ? ui.vFields("event", o.id, doc, ["name", "store", "date", "startTime", "endTime", "venue", "overview", "plan", "memo"]) : ""}
-  ${S.evTab === "macros" ? ui.vMacros("event", o.id, doc) : ""}${S.evTab === "timeline" ? ui.vTimeline("event", o.id, doc) : ""}
-  ${S.evTab === "materials" ? ui.vStaff("event", o.id, doc) + ui.vMaterials("event", o.id, doc) + ui.vFields("event", o.id, doc, ["prep", "cautions"]) : ""}`;
+  ${S.evTab === "overview" ? ui.vFields("event", o.id, doc, F.basic, edit) : ""}
+  ${S.evTab === "macros" ? ui.vMacros("event", o.id, doc, edit) : ""}${S.evTab === "timeline" ? ui.vTimeline("event", o.id, doc, edit) : ""}
+  ${S.evTab === "materials" ? ui.vStaff("event", o.id, doc, edit) + ui.vMaterials("event", o.id, doc, edit) + ui.vFields("event", o.id, doc, F.extra, edit) : ""}`;
 }
 
 // ---------- セレモニー ----------
@@ -229,13 +231,14 @@ function vScript(sel, sv, cname, total, act) {
   const pid = sel.person.id, id = scriptId(pid, sv), f = ui.docOf("ceremony", id), target = { personId: pid, stampValue: sv };
   S.cerCtx = { sel, sv, act };
   if (!f) return `<div class="card"><h2>セレモニー原稿(${sv}スタンプ) <span class="tag">原稿なし</span></h2><div class="row"><button class="b pri" data-act="exscript" data-key="new:${h(id)}">ChatGPTで作成</button><button class="b" data-act="scriptnew" data-p="${h(pid)}" data-v="${sv}">＋手動で原稿を作る</button></div></div>${S.exOpen === `new:${id}` ? ui.vExchange("ceremony", null, { target, scope: id }) : ""}`;
-  const { doc, raw } = f;
+  const { doc, raw } = f; const edit = ui.isEdit("ceremony", id);
   return `<div class="card"><h2>セレモニー原稿(${sv}スタンプ) <span class="tag ${raw.scriptStatus === "complete" ? "" : "warn"}">原稿: ${raw.scriptStatus === "complete" ? "完成" : "下書き"}</span></h2>
-    <div class="row"><button class="b pri" data-act="exscript" data-key="${h(id)}">ChatGPTで編集</button><button class="b" data-act="scriptstatus" data-id="${h(id)}" data-to="${raw.scriptStatus === "complete" ? "draft" : "complete"}">${raw.scriptStatus === "complete" ? "下書きに戻す" : "原稿を完成にする"}</button></div>
-    <p class="mut">「原稿の完成」は実施済みとは別です。実施済みは上の「実施記録」で記録した時だけになります。</p></div>
-  ${S.exOpen === id ? ui.vExchange("ceremony", id, { target }) : ""}
-  ${ui.vFields("ceremony", id, doc, ["characterName", "content", "thanks", "postNote", "prep"])}${ui.vStaff("ceremony", id, doc)}
-  <div class="card"><h3>進行タイムライン</h3>${ui.vTimeline("ceremony", id, doc)}</div><div class="card"><h3>マクロ</h3>${ui.vMacros("ceremony", id, doc)}</div>`;
+    <div class="row"><button class="b" data-act="scriptstatus" data-id="${h(id)}" data-to="${raw.scriptStatus === "complete" ? "draft" : "complete"}">${raw.scriptStatus === "complete" ? "下書きに戻す" : "原稿を完成にする"}</button></div>
+    <p class="mut">「原稿の完成」は実施済みとは別です。実施済みは上の「実施記録」で記録した時だけになります。</p>
+    ${ui.modeBar("ceremony", id, `<button class="b pri" data-act="exscript" data-key="${h(id)}">ChatGPTで編集</button>`)}</div>
+  ${edit && S.exOpen === id ? ui.vExchange("ceremony", id, { target }) : ""}
+  ${ui.vFields("ceremony", id, doc, ui.FIELDS.ceremony.basic, edit)}${ui.vStaff("ceremony", id, doc, edit)}
+  <div class="card"><h3>進行タイムライン</h3>${ui.vTimeline("ceremony", id, doc, edit)}</div><div class="card"><h3>マクロ</h3>${ui.vMacros("ceremony", id, doc, edit)}</div>`;
 }
 
 // ---------- アーカイブ ----------
@@ -272,7 +275,7 @@ const ACTIONS = {
   newevent: () => run(async () => { S.evId = await createBlankDoc(S.boot.store, "event", { name: val("nename") }, L()); S.evTab = "overview"; }, "作成しました(下書き)", ["nename"]),
   scriptnew: d => run(async () => { await createBlankDoc(S.boot.store, "ceremony", { personId: d.p, stampValue: Number(d.v), characterName: S.cerCtx ? val("cname") : "" }, L()); }, "原稿(下書き)を作りました"),
   scriptstatus: d => run(() => setScriptStatus(S.boot.store, d.id, d.to, L()), d.to === "complete" ? "原稿を完成にしました(実施済みではありません)" : "下書きに戻しました"),
-  nav: d => { S.view = d.v; S.pid = null; S.evId = null; S.q = ""; render(); },
+  nav: d => { if (!ui.leaveGuard()) return; S.view = d.v; S.pid = null; S.evId = null; S.q = ""; render(); },
   homeq: () => { S.q = val("q"); render(); }, custq: () => { S.q = val("q"); render(); },
   openp: d => { S.view = "customers"; S.pid = d.id || null; S.edit = false; render(); },
   toggleedit: () => { S.edit = !S.edit; render(); },
@@ -288,7 +291,7 @@ const ACTIONS = {
   candhold: d => run(() => Op.resolveCandidate(S.boot.store, d.id, "hold", L()), "保留にしました"),
   mkmaster: () => run(async () => { if (!val("mname").trim()) throw new Error("イベント名が必要です"); await Ev.createMaster(S.boot.store, { name: val("mname"), store: val("mstore") || null }); }, "追加しました", ["mname"]),
   mkocc: d => run(async () => { S.evId = await Ev.createOccurrence(S.boot.store, d.id, { date: val("od-" + d.id) || null }); S.evTab = "overview"; }, "開催回を作成しました"),
-  openev: d => { S.view = "events"; S.evId = d.id || null; S.evTab = d.tab || "overview"; S.tl = null; render(); },
+  openev: d => { if (!ui.leaveGuard()) return; S.view = "events"; S.evId = d.id || null; S.evTab = d.tab || "overview"; S.tl = null; render(); },
   evtab: d => { if (ui.dirtyFields() && !confirm("保存していない入力があります。破棄して移動しますか?")) return; S.evTab = d.v; render(); },
   status: d => run(() => Ev.setStatus(S.boot.store, d.id, d.to, Number(d.rev), L()), "状態を変更しました"),
   dup: d => run(async () => { S.evId = await Ev.duplicateOccurrence(S.boot.store, d.id); S.view = "events"; S.evTab = "overview"; }, "複製しました(新しい下書き)"),
@@ -299,7 +302,7 @@ const ACTIONS = {
   applegacy: d => confirm("旧備考を共通備考の末尾へ追記します(元の旧備考は残ります)。よろしいですか?") && run(async () => { const p = S.d.persons.find(x => x.id === d.id); const prof = S.d.shop.toko.profiles.find(x => x.id === d.n); await appendLegacyTokoNote(S.boot.store, d.id, p.revision, prof.notes, L()); }, "追記しました"),
   rescan: () => run(async () => { const sh = S.d.shop; const plan = rescanPlan({ dinerCustomers: sh.diner?.customers ?? [], tokoProfiles: sh.toko?.profiles ?? [] }, `rescan-${Date.now().toString(36)}`); const r = await applyPlan(S.boot.store, plan); toast(`追加 ${r.created}件(既存で内容が違うため触れなかったもの ${r.skippedDiffering.length}件)`); }),
   asearch: () => { S.arch = { store: val("astore"), name: val("aname"), year: val("ayear") }; render(); },
-  cerpick: d => { S.view = "ceremony"; S.cer = { pid: d.id }; render(); },
+  cerpick: d => { if (!ui.leaveGuard()) return; S.view = "ceremony"; S.cer = { pid: d.id }; render(); },
   cerset: () => { S.cer = { ...S.cer, stamp: val("cstamp"), cname: val("cname"), shop: val("cshop"), date: val("cdate"), thanks: document.getElementById("cthanks") ? val("cthanks") : S.cer.thanks }; render(); },
   draw: d => confirm(`${Ce.ACTS[d.act2].name}で確定します。この営業回(${val("cdate")})の全対象者に適用されます。よろしいですか?`) && run(() => Ce.recordDraw(S.boot.store, { storeId: val("cshop"), businessDate: val("cdate"), act: d.act2, personId: d.p, label: label() }), "ダーツの結果を登録しました"),
   savetpl: d => run(async () => { const ex = S.d.templates.find(t => t.act === d.a); if (!val("tplbody")) throw new Error("本文が空です"); if (ex) await S.boot.store.batch([{ op: "update", col: M.ceremonyTemplates, id: ex.id, expectedRevision: ex.revision, data: { body: val("tplbody") } }]); else await S.boot.store.batch([{ op: "create", col: M.ceremonyTemplates, id: "tpl-" + d.a, data: { act: d.a, body: val("tplbody") } }]); }, "テンプレートを保存しました"),
@@ -315,7 +318,7 @@ S.hooks = {
   skeleton: (pid, sv) => { const c = S.cerCtx; return { schema: "ff14rp.ceremony", version: 1, op: "create", target: { personId: pid, stampValue: sv }, facts: factsFor(c.sel, sv, c.act), ceremony: { characterName: "", content: "", thanks: "", staff: [], timeline: { version: 2, steps: [] }, macros: [], prep: [], postNote: "" } }; },
   exportCeremony: (raw, pid, sv) => exportDoc("ceremony", raw, { target: { personId: pid, stampValue: sv }, facts: factsFor(S.cerCtx.sel, sv, S.cerCtx.act) })
 };
-document.addEventListener("toggle", e => { const k = e.target?.dataset?.openKey; if (k) { if (e.target.open) S.open.add(k); else S.open.delete(k); } }, true);
+document.addEventListener("toggle", e => { const k = e.target?.dataset?.openKey; if (k) { if (e.target.dataset.defaultOpen) { if (e.target.open) S.shut.delete(k); else S.shut.add(k); } else if (e.target.open) S.open.add(k); else S.open.delete(k); } }, true);
 document.addEventListener("click", e => { const t = e.target.closest("[data-act]"); if (!t || t.matches("input,select,textarea")) return; e.preventDefault(); const f = ACTIONS[t.dataset.act]; if (f) f({ ...t.dataset }); });
 let composing = false;
 document.addEventListener("compositionstart", () => { composing = true; });

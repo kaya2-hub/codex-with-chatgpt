@@ -3,7 +3,7 @@ import { KINDS, normalizeDoc, updateItem, moveItem, updateFields, newItemId } fr
 import { ROLES, roleJa } from "../core/roles.js";
 import { ITEM_TYPES, TYPE_JA } from "../core/timeline.js";
 import { analyzeMacro } from "../core/macro.js";
-import { exportDoc, SCHEMAS, SCHEMA_VERSION } from "../core/exchange.js";
+import { exportDoc, SCHEMAS, SCHEMA_VERSION, applyPlan, buildNewDoc } from "../core/exchange.js";
 import { previewImport, commitImport } from "../core/exchange-store.js";
 import { buildSpec, buildEditPackage } from "../core/exchange-spec.js";
 import { hashOf, clone } from "../core/util.js";
@@ -16,7 +16,7 @@ const LONG = new Set(["overview", "plan", "memo", "content", "thanks", "postNote
 
 export function createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refresh, today }) {
   const store = () => S.boot.store;
-  const docOf = (kind, id) => { const raw = (kind === "event" ? S.d.occs : S.d.scripts).find(x => x.id === id); return raw ? { raw, doc: normalizeDoc(kind, raw) } : null; };
+  const docOf = (kind, id) => { if (id === "__pv__") return S.imp?.previewDoc ? { raw: {}, doc: S.imp.previewDoc } : null; const raw = (kind === "event" ? S.d.occs : S.d.scripts).find(x => x.id === id); return raw ? { raw, doc: normalizeDoc(kind, raw) } : null; };
   const roleOpts = sel => ROLES.map(r => `<option value="${r.id}" ${r.id === sel ? "selected" : ""}>${r.ja}</option>`).join("") + (sel && !ROLES.some(r => r.id === sel) ? `<option value="${h(sel)}" selected>${h(sel)}(旧データの担当・そのまま保持)</option>` : "");
   const opened = k => (S.open.has(k) ? "open" : "");
 
@@ -41,36 +41,58 @@ export function createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refre
   }
   const isEd = (kind, id, type, itemId) => S.ed && S.ed.kind === kind && S.ed.id === id && S.ed.type === type && S.ed.itemId === itemId;
 
-  // ---------- 各部の表示 ----------
-  function vMacros(kind, id, doc) {
+  // ---------- 各部の表示(閲覧モードが既定。編集モードのときだけ編集操作を表示) ----------
+  const STORE_JA = { diner: "ダイナー", toko: "常若亭" };
+  const FIELDS = { event: { basic: ["name", "store", "date", "startTime", "endTime", "venue", "overview", "plan", "memo"], extra: ["prep", "cautions"] }, ceremony: { basic: ["characterName", "content", "thanks", "postNote", "prep"], extra: [] } };
+  const rtag = r => `<span class="rt rt-${h(r)}">${h(rj(r))}</span>`;
+  const isOpen = (key, force) => force || S.open.has(key);
+  const dirtyFields = () => [...document.querySelectorAll('#view [id^="f-"]')].some(el => "o" in el.dataset && el.value !== el.dataset.o);
+  const isDirty = () => { if (S.ed) readDraft(); return !!(S.ed && hashOf(S.ed.draft) !== S.ed.initHash) || dirtyFields(); };
+  const isEdit = (kind, id) => S.em.has(`${kind}:${id}`);
+
+  function modeBar(kind, id, extra = "") {
+    if (!isEdit(kind, id)) return `<div class="row"><button class="b" data-act="emon" data-kind="${kind}" data-id="${h(id)}">✎ 編集モード</button><span class="mut">いまは閲覧モードです(マクロのコピーや折り畳みは、このままできます)</span></div>`;
+    return `<div class="editbar" role="status"><b>✎ 編集モード</b><span>変更は項目ごとに「保存」を押したとき保存されます</span><span class="grow"></span>${extra}<button class="b" data-act="emoff" data-kind="${kind}" data-id="${h(id)}">編集を終了(閲覧に戻る)</button></div>`;
+  }
+  function macroBlock(kind, id, m, edit, force) {
+    const key = `m:${id}:${m.id}`; if (edit && isEd(kind, id, "macro", m.id)) return edForm(S.ed);
+    const a = analyzeMacro(m.body);
+    const ctl = `<button class="b pri" data-act="mcopy" data-kind="${kind}" data-id="${h(id)}" data-item="${h(m.id)}">コピー</button>` + (edit ? ` <button class="b" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="macro" data-item="${h(m.id)}">編集</button> <button class="b dng" data-act="eddel" data-kind="${kind}" data-id="${h(id)}" data-type="macro" data-item="${h(m.id)}" data-hash="${hashOf(m)}">削除</button>` : "");
+    return `<details class="mac mac-${h(m.role)}" data-open-key="${h(key)}" ${isOpen(key, force) ? "open" : ""}><summary>${rtag(m.role)} <b>${h(m.title)}</b> ${ctl}</summary><pre class="macro">${h(m.body)}</pre>${m.note ? `<div class="mut">${h(m.note)}</div>` : ""}${a.warnings.map(w => `<div class="warn mut">⚠ ${h(w)}</div>`).join("")}</details>`;
+  }
+  function vMacros(kind, id, doc, edit = false, force = false) {
     const groups = [...ROLES.map(r => [r.id, r.ja]), ["", "その他"]];
-    return groups.map(([rid, ja]) => { const ms = doc.macros.filter(m => (rid ? m.role === rid : !ROLES.some(r => r.id === m.role))); if (!ms.length && !rid) return "";
-      return `<details class="card" data-open-key="g:${h(id)}:${rid}" ${opened(`g:${id}:${rid}`)}><summary><b>${h(ja)}のマクロ</b> <span class="mut">${ms.length}件</span></summary>${ms.map(m => {
-        const a = analyzeMacro(m.body); const key = `m:${id}:${m.id}`;
-        if (isEd(kind, id, "macro", m.id)) return edForm(S.ed);
-        return `<details data-open-key="${h(key)}" ${opened(key)} style="margin:6px 0"><summary><b>${h(m.title)}</b> <button class="b pri" data-act="mcopy" data-kind="${kind}" data-id="${h(id)}" data-item="${h(m.id)}">コピー</button> <button class="b" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="macro" data-item="${h(m.id)}">編集</button> <button class="b dng" data-act="eddel" data-kind="${kind}" data-id="${h(id)}" data-type="macro" data-item="${h(m.id)}" data-hash="${hashOf(m)}">削除</button></summary><pre class="macro">${h(m.body)}</pre>${m.note ? `<div class="mut">${h(m.note)}</div>` : ""}${a.warnings.map(w => `<div class="warn mut">⚠ ${h(w)}</div>`).join("")}</details>`; }).join("") || '<p class="mut">なし</p>'}</details>`; }).join("")
-      + (isEd(kind, id, "macro", "new") ? edForm(S.ed) : `<button class="b pri" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="macro" data-item="new">＋マクロを追加</button>`);
+    return groups.map(([rid, ja]) => { const ms = doc.macros.filter(m => (rid ? m.role === rid : !ROLES.some(r => r.id === m.role))); if (!ms.length && !rid) return ""; const gk = `g:${id}:${rid}`;
+      return `<details class="card grp grp-${rid || "x"}" data-open-key="${h(gk)}" ${isOpen(gk, force) ? "open" : ""}><summary><b>${h(ja)}のマクロ</b> <span class="mut">${ms.length}件</span></summary>${ms.map(m => macroBlock(kind, id, m, edit, force)).join("") || '<p class="mut">なし</p>'}</details>`; }).join("")
+      + (!edit ? "" : isEd(kind, id, "macro", "new") ? edForm(S.ed) : `<button class="b pri" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="macro" data-item="new">＋マクロを追加</button>`);
   }
   const colItems = items => items.map(it => `<div class="it"><span class="tag it-${it.type}">${TYPE_JA[it.type]}</span> <span style="white-space:pre-wrap">${h(it.text)}</span></div>`).join("");
-  function vTimeline(kind, id, doc) {
-    const steps = doc.timeline.steps;
-    return `<div class="cols3 sticky"><div class="h">かや</div><div class="h">タイミング・合図・共通条件</div><div class="h">トーシン</div></div>` + steps.map((s, i) => {
-      if (isEd(kind, id, "step", s.id)) return edForm(S.ed);
-      const ctl = `<button class="b" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="step" data-item="${h(s.id)}">編集</button><button class="b" data-act="edmove" data-kind="${kind}" data-id="${h(id)}" data-key="steps" data-item="${h(s.id)}" data-dir="-1" ${i === 0 ? "disabled" : ""}>↑</button><button class="b" data-act="edmove" data-kind="${kind}" data-id="${h(id)}" data-key="steps" data-item="${h(s.id)}" data-dir="1" ${i === steps.length - 1 ? "disabled" : ""}>↓</button><button class="b" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="step" data-item="new" data-after="${h(s.id)}">＋下に追加</button><button class="b dng" data-act="eddel" data-kind="${kind}" data-id="${h(id)}" data-type="step" data-item="${h(s.id)}" data-hash="${hashOf(s)}">削除</button>`;
-      return `<div class="step"><div class="row"><b>${h(s.time || "(時刻未定)")}</b>${s.phase ? `<span class="tag">${h(s.phase)}</span>` : ""}${s.note ? `<span class="mut">${h(s.note)}</span>` : ""}<span class="grow"></span>${ctl}</div>
-        <div class="cols3"><div class="cell"><div class="cl">かや</div>${colItems(s.kaya)}</div><div class="cell"><div class="cl">タイミング・合図・共通条件</div>${colItems(s.cue)}</div><div class="cell"><div class="cl">トーシン</div>${colItems(s.toushin)}</div></div></div>`; }).join("")
-      + (isEd(kind, id, "step", "new") ? edForm(S.ed) : `<button class="b pri" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="step" data-item="new">＋ステップを追加</button>`)
-      + (doc.timelineLegacy || steps.length === 0 ? "" : "");
+  const stepBlock = (s, ctl = "") => `<div class="step"><div class="row"><b>${h(s.time || "(時刻未定)")}</b>${s.phase ? `<span class="tag">${h(s.phase)}</span>` : ""}${s.note ? `<span class="mut">${h(s.note)}</span>` : ""}<span class="grow"></span>${ctl}</div>
+    <div class="cols3"><div class="cell c-kaya"><div class="cl">かや</div>${colItems(s.kaya)}</div><div class="cell c-cue"><div class="cl">タイミング・合図・共通条件</div>${colItems(s.cue)}</div><div class="cell c-toushin"><div class="cl">トーシン</div>${colItems(s.toushin)}</div></div></div>`;
+  function vTimeline(kind, id, doc, edit = false) {
+    const steps = doc.timeline.steps; const E = (act, extra) => `data-act="${act}" data-kind="${kind}" data-id="${h(id)}" ${extra}`;
+    return `<div id="${id === "__pv__" ? "pv-tl" : "doc-tl"}"><div class="cols3 sticky"><div class="h c-kaya">かや</div><div class="h c-cue">タイミング・合図・共通条件</div><div class="h c-toushin">トーシン</div></div>`
+      + (steps.map((s, i) => {
+        if (edit && isEd(kind, id, "step", s.id)) return edForm(S.ed);
+        const ctl = !edit ? "" : `<button class="b" ${E("edopen", `data-type="step" data-item="${h(s.id)}"`)}>編集</button><button class="b" ${E("edmove", `data-key="steps" data-item="${h(s.id)}" data-dir="-1"`)} ${i === 0 ? "disabled" : ""}>↑</button><button class="b" ${E("edmove", `data-key="steps" data-item="${h(s.id)}" data-dir="1"`)} ${i === steps.length - 1 ? "disabled" : ""}>↓</button><button class="b" ${E("edopen", `data-type="step" data-item="new" data-after="${h(s.id)}"`)}>＋下に追加</button><button class="b dng" ${E("eddel", `data-type="step" data-item="${h(s.id)}" data-hash="${hashOf(s)}"`)}>削除</button>`;
+        return stepBlock(s, ctl); }).join("") || '<p class="mut">ステップはまだありません</p>')
+      + (!edit ? "" : isEd(kind, id, "step", "new") ? edForm(S.ed) : `<button class="b pri" ${E("edopen", 'data-type="step" data-item="new"')}>＋ステップを追加</button>`) + "</div>";
   }
-  function vList(kind, id, doc, type, title, render) {
+  function vList(kind, id, doc, type, title, render, edit) {
     const key = LISTKEY[type]; const items = doc[key];
-    return `<div class="card"><h3>${title}</h3>${items.map(x => isEd(kind, id, type, x.id) ? edForm(S.ed) : `<div class="row">${render(x)}<span class="grow"></span><button class="b" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="${type}" data-item="${h(x.id)}">編集</button><button class="b dng" data-act="eddel" data-kind="${kind}" data-id="${h(id)}" data-type="${type}" data-item="${h(x.id)}" data-hash="${hashOf(x)}">削除</button></div>`).join("") || '<p class="mut">なし</p>'}${isEd(kind, id, type, "new") ? edForm(S.ed) : `<button class="b" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="${type}" data-item="new">＋追加</button>`}</div>`;
+    return `<div class="card"><h3>${title}</h3>${items.map(x => edit && isEd(kind, id, type, x.id) ? edForm(S.ed) : `<div class="row">${render(x)}<span class="grow"></span>${edit ? `<button class="b" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="${type}" data-item="${h(x.id)}">編集</button><button class="b dng" data-act="eddel" data-kind="${kind}" data-id="${h(id)}" data-type="${type}" data-item="${h(x.id)}" data-hash="${hashOf(x)}">削除</button>` : ""}</div>`).join("") || '<p class="mut">なし</p>'}${!edit ? "" : isEd(kind, id, type, "new") ? edForm(S.ed) : `<button class="b" data-act="edopen" data-kind="${kind}" data-id="${h(id)}" data-type="${type}" data-item="new">＋追加</button>`}</div>`;
   }
-  const vStaff = (kind, id, doc) => vList(kind, id, doc, "staff", "担当・役割", x => `<span class="tag">${h(roleJa(x.role))}</span> ${h(x.duty)}`);
-  const vMaterials = (kind, id, doc) => vList(kind, id, doc, "material", "資料", x => `<b>${h(x.label || x.url)}</b> ${safeUrl(x.url) ? `<a href="${h(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${h(x.url)}</a>` : h(x.url)} <span class="mut">${h(x.note)}</span>`);
-  /** 基本情報フォーム。保存時は「変更した項目だけ」を書く。 */
-  function vFields(kind, id, doc, fields) {
-    const k = KINDS[kind]; const inp = f => {
+  const vStaff = (kind, id, doc, edit = false) => vList(kind, id, doc, "staff", "担当・役割", x => `${rtag(x.role)} ${h(x.duty)}`, edit);
+  const vMaterials = (kind, id, doc, edit = false) => vList(kind, id, doc, "material", "資料", x => `<b>${h(x.label || x.url)}</b> ${safeUrl(x.url) ? `<a href="${h(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${h(x.url)}</a>` : h(x.url)} <span class="mut">${h(x.note)}</span>`, edit);
+  /** 閲覧用の項目表示(登録後の画面と取り込みプレビューで共通)。 */
+  function vFieldsView(kind, doc, fields) {
+    const show = f => { const v = doc[f]; if (f === "store") return STORE_JA[v] ?? "共通・未定"; if (f === "date") return v || "未定"; if (Array.isArray(v)) return v.length ? `<ul>${v.map(x => `<li style="white-space:pre-wrap">${h(x)}</li>`).join("")}</ul>` : null; return v ? `<span style="white-space:pre-wrap">${h(v)}</span>` : null; };
+    return `<div class="card"><dl class="kv">${fields.map(f => `<dt>${FIELD_LABEL[f]}</dt><dd>${show(f) ?? '<span class="mut">(未入力)</span>'}</dd>`).join("")}</dl></div>`;
+  }
+  /** 基本情報フォーム(編集モード)。保存時は「変更した項目だけ」を書く。閲覧モードは読み取り表示。 */
+  function vFields(kind, id, doc, fields, edit = false) {
+    if (!edit) return vFieldsView(kind, doc, fields);
+    const inp = f => {
       const v = Array.isArray(doc[f]) ? doc[f].join("\n") : doc[f] ?? "";
       if (f === "store") return `<label>${FIELD_LABEL[f]}<select id="f-store" data-o="${h(doc.store || "")}"><option value="" ${!doc.store ? "selected" : ""}>共通・未定</option><option value="diner" ${doc.store === "diner" ? "selected" : ""}>ダイナー</option><option value="toko" ${doc.store === "toko" ? "selected" : ""}>常若亭</option></select></label>`;
       if (f === "date") return `<label>${FIELD_LABEL[f]}<input type="date" id="f-date" data-o="${h(doc.date || "")}" value="${h(doc.date || "")}"></label>`;
@@ -79,40 +101,73 @@ export function createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refre
     };
     return `<div class="card"><div class="row">${fields.map(inp).join("")}</div><div class="row"><button class="b pri" data-act="savefields" data-kind="${kind}" data-id="${h(id)}" data-fields="${fields.join(",")}">保存(変更した項目だけ)</button></div></div>`;
   }
+  /** ドキュメント全体の閲覧表示。取り込みプレビュー(登録される内容の全表示)にも使う=登録後の画面と同じ部品。 */
+  function vDocAll(kind, id, doc, force = true) {
+    const sec = (title, body, open = true) => `<details class="card sec" data-open-key="sec:${h(id)}:${h(title)}" ${force ? "open" : open ? "open" : ""}><summary><b>${title}</b></summary>${body}</details>`;
+    const f = FIELDS[kind];
+    return sec("基本情報", vFieldsView(kind, doc, f.basic)) + sec(`担当・役割(${doc.staff.length}件)`, vStaff(kind, id, doc, false)) + (f.extra.length ? sec("準備事項・注意事項", vFieldsView(kind, doc, f.extra)) : "")
+      + sec(`進行タイムライン(${doc.timeline.steps.length}ステップ)`, vTimeline(kind, id, doc, false)) + sec(`マクロ(${doc.macros.length}件)`, vMacros(kind, id, doc, false, force))
+      + (kind === "event" ? sec(`資料(${doc.materials.length}件)`, vMaterials(kind, id, doc, false)) : "");
+  }
 
-  // ---------- ChatGPT連携 ----------
+  // ---------- ChatGPT連携(手順つきパネル) ----------
   function vExchange(kind, id, extra = {}) {
     const tgt = extra.target ? `data-p="${h(extra.target.personId)}" data-v="${extra.target.stampValue}"` : "";
-    const ex = S.imp && S.imp.kind === kind && S.imp.scope === (id ?? extra.scope ?? "new") ? S.imp : null;
+    const scope = id ?? extra.scope ?? "new"; const ex = S.imp && S.imp.kind === kind && S.imp.scope === scope ? S.imp : null;
+    const what = kind === "event" ? "イベント" : "セレモニー原稿"; const mine = id ? "edit" : "new"; const gk = `guide:${kind}:${mine}`;
+    const step = (n, title, body) => `<li><span class="num">${n}</span><div><b>${title}</b><div>${body}</div></div></li>`;
+    const steps = id
+      ? [step(1, "編集用データをコピーする", `<button class="b pri" data-act="exportcopy" data-kind="${kind}" data-id="${h(id)}" ${tgt}>編集用データをコピー(仕様書＋現在のデータ)</button> <button class="b" data-act="exportjson" data-kind="${kind}" data-id="${h(id)}" ${tgt}>JSONファイルを書き出す</button><br>コピーした文章をChatGPT(チャッピー)に貼り付けます。`),
+         step(2, "ChatGPTに修正を相談する", "「このセリフを変更したい」「地下への移動を5分早めたい」など、普段どおりの会話で伝えます。"),
+         step(3, "ChatGPTからの質問に答える", "足りない情報や確認があればChatGPTが質問します。答えて内容を固めてください。"),
+         step(4, "完成したら書き出しを指示する", "「書き出して」「これでOK」と伝えると、更新版のJSONが出力されます。"),
+         step(5, "更新版JSONを取り込む", "ChatGPTの .json ファイルを保存して下の「ファイルを選択」から取り込みます。ファイルが作れない場合は、JSON本文をコピーして貼り付けます。"),
+         step(6, "差分を確認して反映する", "変更前/後・追加・削除・競合を確認し、反映したい変更だけチェックして反映します。細かな修正は編集モードから手動でもできます。")]
+      : [step(1, "仕様書をコピーする", `<button class="b pri" data-act="spec" data-kind="${kind}" ${tgt}>仕様書をコピー</button>${kind === "ceremony" ? ` <button class="b" data-act="exportcopy" data-kind="${kind}" data-id="" ${tgt}>お客様情報つきの雛形＋仕様書をコピー</button>` : ""}<br>コピーした文章をChatGPT(チャッピー)に貼り付けます。`),
+         step(2, `ChatGPTと${what}の内容を作る`, kind === "event" ? "タイムライン・マクロ・企画内容・担当者などを、普段どおりChatGPTとの会話で作成します。" : "セレモニーの流れ・かや/トーシンの役割・マクロ・個別の感謝コメントなどを、普段どおりChatGPTとの会話で作成します。"),
+         step(3, "ChatGPTからの質問に答える", "開催日や担当など足りない情報があればChatGPTが質問します。相談しながら内容を完成させてください(未定のままでも下書きとして登録できます)。"),
+         step(4, "完成したら書き出しを指示する", "内容を伝え終えたら、ChatGPTへ「書き出して」「これでOK」と伝えます。"),
+         step(5, "JSONを取り込む", "ChatGPTが作った .json ファイルを保存し、下の「ファイルを選択」から取り込みます。ファイルが作れない場合は、出力されたJSON本文をコピーして貼り付けます。"),
+         step(6, "内容を確認して登録する", "プレビューで登録される内容をすべて確認し、問題がなければ登録します。登録後に直したい箇所は、編集モードから手動で修正できます。")];
     return `<div class="card"><h3>ChatGPTで${id ? "編集" : "作成"}</h3>
-      <p class="mut">企画・進行表の相談はChatGPTで自由に。仕様書を貼ると、完成したJSONを出力してくれます。そのJSONをここへ取り込みます(外部APIは使いません)。</p>
-      <div class="row"><button class="b pri" data-act="spec" data-kind="${kind}" ${tgt}>仕様書をコピー</button>
-        ${id ? `<button class="b" data-act="exportcopy" data-kind="${kind}" data-id="${h(id)}" ${tgt}>編集用データをコピー(仕様書＋現在のデータ)</button><button class="b" data-act="exportjson" data-kind="${kind}" data-id="${h(id)}" ${tgt}>JSONを書き出す(ファイル)</button>` : `<button class="b" data-act="exportcopy" data-kind="${kind}" data-id="" ${tgt}>新規用の雛形つき仕様書をコピー</button>`}</div>
-      <h4>完成したJSONを取り込む</h4>
-      <div class="row"><input type="file" id="imfile" accept=".json,application/json" data-act="imfile"></div>
-      <textarea id="imtext" placeholder="ChatGPTが出力したJSONをここに貼り付け(またはファイルを選択)" style="min-height:90px">${h(ex?.text ?? "")}</textarea>
-      <button class="b" data-act="imcheck" data-kind="${kind}" data-scope="${h(id ?? extra.scope ?? "new")}">検証してプレビュー</button>
-      ${ex ? vPreview(ex) : ""}</div>`;
+      <details class="guide" data-open-key="${gk}" data-default-open="1" ${S.shut.has(gk) ? "" : "open"}><summary><b>手順(6ステップ)</b> <span class="mut">クリックで折り畳み</span></summary><ol class="guide-steps">${steps.join("")}</ol></details>
+      <h4>取り込む(手順5)</h4>
+      <div class="row"><label>ファイルを選択 <input type="file" id="imfile" accept=".json,application/json" data-act="imfile"></label></div>
+      <textarea id="imtext" placeholder="または、ChatGPTが出力したJSON本文をここに貼り付け" style="min-height:90px">${h(ex?.text ?? "")}</textarea>
+      <button class="b pri" data-act="imcheck" data-kind="${kind}" data-scope="${h(scope)}">検証してプレビュー(まだ保存しません)</button>
+      ${ex ? vPreview(ex, kind) : ""}</div>`;
   }
-  const itemsTxt = (arr, l) => (arr ?? []).map(i => `${l}[${TYPE_JA[i.type] ?? i.type}] ${i.text}`).join("\n");
-  const describe = v => { if (v == null) return "(なし)"; if (typeof v === "string") return v; if (Array.isArray(v)) return v.map(x => (typeof x === "string" ? x : x.id ?? JSON.stringify(x))).join("\n");
-    if ("body" in v) return `[${rj(v.role)}] ${v.title}\n${v.body}`; if ("duty" in v) return `${rj(v.role)}: ${v.duty}`; if ("label" in v) return `${v.label} ${v.url} ${v.note}`.trim();
-    if ("kaya" in v) return [`${v.time} ${v.phase}`.trim(), itemsTxt(v.kaya, "かや"), itemsTxt(v.cue, "合図"), itemsTxt(v.toushin, "トーシン"), v.note].filter(Boolean).join("\n"); return JSON.stringify(v); };
-  const short = v => { const t = describe(v); return t.length > 600 ? t.slice(0, 600) + "…" : t; };
-  const macroWarn = c => (c.area === "macros" && c.after ? analyzeMacro(c.after.body).warnings : []);
-  function vPreview(ex) {
+  // 変更カード(取り込み差分): 追加=緑・変更=黄・削除=赤・競合=赤枠。前後を登録後の画面と同じ部品で表示
+  const KIND_BADGE = { field: ["変更", "ch-edit"], "item-edit": ["変更", "ch-edit"], "item-add": ["追加", "ch-add"], "item-remove": ["削除", "ch-remove"], order: ["並べ替え", "ch-edit"] };
+  function valHtml(kind, c, v, curDoc) {
+    if (v == null) return '<span class="mut">(なし)</span>';
+    if (c.kind === "order") return `<ol>${v.map(i => { const it = (c.area === "steps" ? curDoc.timeline.steps : curDoc[c.area]).find(x => x.id === i); return `<li>${h(it ? (c.area === "steps" ? `${it.time} ${it.phase}`.trim() || "(時刻未定)" : it.title ?? it.label ?? it.duty ?? i) : i)}</li>`; }).join("")}</ol>`;
+    if (c.kind === "field") return Array.isArray(v) ? (v.length ? `<ul>${v.map(x => `<li>${h(x)}</li>`).join("")}</ul>` : '<span class="mut">(空)</span>') : `<pre class="macro">${h(c.area === "store" ? STORE_JA[v] ?? "共通・未定" : String(v) || "(空)")}</pre>`;
+    if (c.area === "steps") return stepBlock(v);
+    if (c.area === "macros") return macroBlock(kind, "__pv__", v, false, true);
+    if (c.area === "staff") return `${rtag(v.role)} ${h(v.duty)}`;
+    return `<b>${h(v.label)}</b> ${h(v.url)} <span class="mut">${h(v.note)}</span>`;
+  }
+  function vPreview(ex, kind) {
     const p = ex.preview;
-    const errs = p.errors?.length ? `<div class="bad"><b>取り込めません(保存していません)</b><ul>${p.errors.map(e => `<li><code>${h(e.path)}</code> ${h(e.message)}</li>`).join("")}</ul></div>` : "";
+    const errs = p.errors?.length ? `<div class="bad"><b>取り込めません(何も保存していません)</b><ul>${p.errors.map(e => `<li><code>${h(e.path)}</code> ${h(e.message)}</li>`).join("")}</ul></div>` : "";
     const warns = p.warnings?.length ? `<div class="warn">${p.warnings.map(e => `⚠ <code>${h(e.path)}</code> ${h(e.message)}`).join("<br>")}</div>` : "";
     if (!p.ok) return errs + warns;
-    if (p.mode === "create") { const d = p.data; const mw = (d.macros ?? []).flatMap(m => analyzeMacro(m.body).warnings.map(w => `${m.title}: ${w}`)); return `${warns}${mw.map(w => `<div class="warn">⚠ ${h(w)}</div>`).join("")}<div class="card"><b>新規登録のプレビュー</b><p>${h(d.name ?? "(原稿)")} ・ ステップ ${d.steps?.length ?? 0} ・ マクロ ${d.macros?.length ?? 0} ・ 資料 ${d.materials?.length ?? 0}</p><p class="mut">下書きとして登録します(開催状態は「下書き」。取り込みだけで開催済み・実施済み・完成にはなりません)。</p><button class="b pri" data-act="imcommit">この内容で新規登録する</button></div>`; }
-    const ch = p.plan.changes;
-    return `${warns}<div class="card"><b>変更の差分(チェックした変更だけを反映)</b> <span class="mut">対象: ${h(p.raw?.name ?? p.raw?.characterName ?? p.raw?.id ?? "")}</span>${p.plan.notes.map(n => `<div class="mut">ℹ ${h(n)}</div>`).join("")}
-      ${ch.map(c => `<div class="card" ${c.conflict ? 'style="border-color:var(--bad)"' : ""}><label><input type="checkbox" id="ck-${h(c.key)}" ${c.conflict || c.defaultOff ? "" : "checked"}> <b>${h(c.label)}</b> ${h(c.title ?? "")}</label>${c.defaultOff ? `<div class="warn">⚠ ${h(c.reason)}</div>` : ""}${c.conflict ? `<div class="bad">競合: ${h(c.reason ?? "現在の値と取り込み側の両方が変更されています")} — チェックすると<b>取り込み側を採用</b>、外すと現在の値を維持</div>` : ""}<details><summary class="mut">前後を見る</summary><div class="cols3" style="grid-template-columns:1fr 1fr">${macroWarn(c).map(w => `<div class="warn mut">⚠ ${h(w)}</div>`).join("")}<pre class="macro">現在: ${h(short(c.before))}</pre><pre class="macro">取り込み後: ${h(short(c.after))}</pre></div></details></div>`).join("") || '<p class="mut">差分はありません(現在のデータと同じ内容です)</p>'}
-      ${ch.length ? '<button class="b pri" data-act="imcommit">チェックした変更を反映する</button>' : ""}</div>`;
+    const pd = ex.previewDoc; const mw = pd.macros.flatMap(m => analyzeMacro(m.body).warnings.map(w => `${m.title}: ${w}`));
+    const warnAll = warns + mw.map(w => `<div class="warn">⚠ ${h(w)}</div>`).join("");
+    if (p.mode === "create") return `${warnAll}<div class="card previewbar"><b>新規登録のプレビュー</b> <span class="mut">登録される内容をすべて表示しています(登録後の画面と同じ表示)。下書きとして登録し、開催済み・実施済み・完成にはなりません。</span><div class="row"><button class="b pri" data-act="imcommit">この内容で新規登録する</button></div></div>${vDocAll(kind, "__pv__", pd, true)}<div class="row"><button class="b pri" data-act="imcommit">この内容で新規登録する</button></div>`;
+    const ch = p.plan.changes; const cur = normalizeDoc(kind, p.raw);
+    const count = k => ch.filter(c => KIND_BADGE[c.kind][1] === k && !c.conflict).length;
+    return `${warnAll}<div class="card previewbar"><b>変更の差分(チェックした変更だけを反映)</b> <span class="mut">対象: ${h(cur.name || cur.characterName || p.raw.id)}</span>
+      <div class="row"><span class="tag ch-add">追加 ${count("ch-add")}</span><span class="tag ch-edit">変更 ${count("ch-edit")}</span><span class="tag ch-remove">削除 ${count("ch-remove")}</span><span class="tag ch-conf">競合 ${ch.filter(c => c.conflict).length}</span></div>
+      ${p.plan.notes.map(n => `<div class="mut">ℹ ${h(n)}</div>`).join("")}</div>
+      ${ch.map(c => { const [bt, bc] = KIND_BADGE[c.kind]; return `<div class="card chg ${c.conflict ? "ch-conf" : bc}"><label><input type="checkbox" id="ck-${h(c.key)}" ${c.conflict || c.defaultOff ? "" : "checked"}> <span class="tag ${c.conflict ? "ch-conf" : bc}">${c.conflict ? "競合" : bt}</span> <b>${h(c.label)}</b> ${h(c.title ?? "")}</label>
+        ${c.defaultOff ? `<div class="warn">⚠ ${h(c.reason)}</div>` : ""}${c.conflict ? `<div class="bad">競合: ${h(c.reason ?? "現在の値と取り込み側の両方が変更されています")} — チェックすると<b>取り込み側を採用</b>、外すと現在の値を維持</div>` : ""}${(c.area === "macros" && c.after ? analyzeMacro(c.after.body).warnings : []).map(w => `<div class="warn mut">⚠ ${h(w)}</div>`).join("")}
+        <div class="cols3 ba"><div><div class="mut">変更前(現在)</div>${valHtml(kind, c, c.before, cur)}</div><div><div class="mut">変更後(取り込み)</div>${valHtml(kind, c, c.after, cur)}</div></div></div>`; }).join("") || '<p class="mut">差分はありません(現在のデータと同じ内容です)</p>'}
+      ${ch.length ? '<button class="b pri" data-act="imcommit">チェックした変更を反映する</button>' : ""}
+      <details class="card"><summary><b>反映後の全内容</b> <span class="mut">(いまのチェック状態ではなく、既定の選択で反映した場合)</span></summary>${vDocAll(kind, "__pv__", pd, false)}</details>`;
   }
 
-  const dirtyFields = () => [...document.querySelectorAll('#view [id^="f-"]')].some(el => "o" in el.dataset && el.value !== el.dataset.o);
   // ---------- 操作 ----------
   const L = () => ({ label: label() });
   const downloadJson = (name, obj) => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" })); a.download = name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
@@ -123,11 +178,15 @@ export function createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refre
     exportcopy: d => copy(buildEditPackage(d.kind, exportOf(d))),
     exportjson: d => downloadJson(`${d.kind}-${(d.id || "new").slice(0, 24)}.json`, exportOf(d)),
     imfile: () => { const f = document.getElementById("imfile").files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { document.getElementById("imtext").value = String(r.result); toast("ファイルを読み込みました。「検証してプレビュー」を押してください"); }; r.onerror = () => toast("ファイルを読み込めませんでした", true); r.readAsText(f, "utf-8"); },
-    imcheck: d => run(async () => { const text = val("imtext"); S.imp = { kind: d.kind, scope: d.scope, text, preview: await previewImport(store(), d.kind, text, d.scope) }; }),
+    imcheck: d => run(async () => { const text = val("imtext"); const preview = await previewImport(store(), d.kind, text, d.scope); let previewDoc = null;
+      if (preview.ok) previewDoc = normalizeDoc(d.kind, preview.mode === "create" ? buildNewDoc(d.kind, preview.data) : { ...preview.raw, ...applyPlan(d.kind, preview.raw, preview.data, preview.plan, {}).patch });
+      S.imp = { kind: d.kind, scope: d.scope, text, preview, previewDoc }; }),
     imcommit: () => { const ex = S.imp; if (!ex?.preview?.ok) return; const p = ex.preview;
       const decisions = {}; for (const c of p.plan?.changes ?? []) decisions[c.key] = !!document.getElementById(`ck-${c.key}`)?.checked;
       if (!confirm(p.mode === "create" ? "この内容で新規登録します(下書き)。よろしいですか?" : `チェックした ${Object.values(decisions).filter(Boolean).length} 件の変更を反映します。よろしいですか?`)) return;
       return run(async () => { const r = await commitImport(store(), ex.kind, p, decisions, L()); S.imp = null; if (r.mode === "create" && ex.kind === "event") { S.view = "events"; S.evId = r.id; S.evTab = "overview"; } }, "取り込みました"); },
+    emon: d => { S.em.add(`${d.kind}:${d.id}`); S.render(); },
+    emoff: d => { if (isDirty() && !confirm("保存していない変更があります。破棄して編集モードを終了しますか?")) return; S.ed = null; S.em.delete(`${d.kind}:${d.id}`); if (S.exOpen === d.id) S.exOpen = null; S.imp = null; S.render(); },
     edopen: d => { if (S.ed) { readDraft(); if (hashOf(S.ed.draft) !== S.ed.initHash && !confirm("編集中の内容があります。破棄して別の項目を開きますか?")) return; }
       const f = docOf(d.kind, d.id); if (!f) return; const key = LISTKEY[d.type]; let draft, base; const cur = d.item === "new" ? null : f.doc[key === "steps" ? "timeline" : key]; 
       const list = key === "steps" ? f.doc.timeline.steps : f.doc[key]; const it = d.item === "new" ? null : list.find(x => x.id === d.item);
@@ -156,5 +215,7 @@ export function createDocUI({ S, h, label, run, toast, copy, val, safeUrl, refre
       if ("name" in patch && !String(patch.name).trim()) return toast("イベント名は空にできません", true);
       return run(() => updateFields(store(), d.kind, d.id, patch, { baseValues, ...L() }), "保存しました"); }
   };
-  return { vMacros, vTimeline, vStaff, vMaterials, vFields, vExchange, actions, docOf, opened, readDraft, dirtyFields };
+  /** 画面遷移の前に呼ぶ。編集モード中に未保存の変更があれば破棄確認。許可されたら編集状態を片付ける。 */
+  const leaveGuard = () => { if (S.em.size && isDirty() && !confirm("編集モード中に保存していない変更があります。破棄して移動しますか?")) return false; S.em.clear(); S.ed = null; return true; };
+  return { vMacros, vTimeline, vStaff, vMaterials, vFields, vExchange, vDocAll, modeBar, isEdit, leaveGuard, FIELDS, actions, docOf, readDraft, dirtyFields };
 }

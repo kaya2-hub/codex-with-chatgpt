@@ -37,3 +37,31 @@ pre.macro{white-space:pre-wrap;word-break:break-word;background:var(--bg);border
 details>summary{cursor:pointer}details.card>summary{margin-bottom:6px}
 .clist .crow{display:grid;grid-template-columns:2fr 1.2fr 1fr 1fr 2fr;gap:6px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}.clist .crow.head{font-size:12px;color:var(--mut);font-weight:700}
 @media (max-width:640px){.cl{display:block}.clist .crow{grid-template-columns:1fr 1fr}.clist .crow.head{display:none}.clist .crow>span[data-l]::before{content:attr(data-l) "：";color:var(--mut);font-size:12px}.cols3.sticky{display:none}}
+
+/* 担当者の色分け: かや=淡いピンク / トーシン=淡い緑 / 合図・共通条件=中立。ダークモードでも本文の可読性を保つ */
+:root{--kaya:#fdeaf1;--kaya-2:#f9d7e5;--kaya-line:#efb4cc;--toushin:#e6f5e9;--toushin-2:#d1ecd7;--toushin-line:#a9d6b3;--cue:#f2f0f4;--cue-line:#d9d5de;--ok:#2e7d32;--chg:#9a6a00;--edit:#fff3cd;--edit-line:#d9a400}
+@media (prefers-color-scheme:dark){:root{--kaya:#3a2630;--kaya-2:#47303b;--kaya-line:#6d4559;--toushin:#233a2b;--toushin-2:#2c4a36;--toushin-line:#43684f;--cue:#2c2931;--cue-line:#48434f;--ok:#7fd48a;--chg:#e6b84d;--edit:#4a3b12;--edit-line:#a98a1f}}
+.cell.c-kaya,.cols3 .h.c-kaya{background:var(--kaya);border-color:var(--kaya-line)}
+.cell.c-toushin,.cols3 .h.c-toushin{background:var(--toushin);border-color:var(--toushin-line)}
+.cell.c-cue,.cols3 .h.c-cue{background:var(--cue);border-color:var(--cue-line)}
+.cols3 .h{border-radius:6px;border:1px solid transparent}
+.card.grp-Kaya{background:var(--kaya);border-color:var(--kaya-line)}.card.grp-Toushin{background:var(--toushin);border-color:var(--toushin-line)}
+details.mac{border:1px solid var(--line);border-radius:8px;padding:4px 8px;margin:6px 0}
+details.mac-Kaya{background:var(--kaya-2);border-color:var(--kaya-line)}details.mac-Toushin{background:var(--toushin-2);border-color:var(--toushin-line)}
+details.mac pre.macro{background:var(--card)}
+.rt{display:inline-block;font-size:11px;padding:1px 8px;border-radius:99px;border:1px solid var(--line)}
+.rt-Kaya{background:var(--kaya-2);border-color:var(--kaya-line)}.rt-Toushin{background:var(--toushin-2);border-color:var(--toushin-line)}
+/* 編集モード */
+.editbar{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;position:sticky;top:0;z-index:3;padding:8px 12px;margin:0 0 12px;background:var(--edit);border:1px solid var(--edit-line);border-left:6px solid var(--edit-line);border-radius:8px}
+/* ChatGPT手順 */
+.guide-steps{list-style:none;margin:8px 0;padding:0;display:grid;gap:8px}.guide-steps li{display:flex;gap:10px;align-items:flex-start}
+.guide-steps .num{flex:none;width:24px;height:24px;border-radius:50%;background:var(--acc);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:700}
+/* プレビュー/差分 */
+.previewbar{border-left:6px solid var(--acc)}
+.chg{border-left:6px solid var(--line)}.chg.ch-add{border-left-color:var(--ok)}.chg.ch-edit{border-left-color:var(--chg)}.chg.ch-remove{border-left-color:var(--bad)}.chg.ch-conf{border:2px solid var(--bad);border-left-width:6px}
+.tag.ch-add{border-color:var(--ok);color:var(--ok)}.tag.ch-edit{border-color:var(--chg);color:var(--chg)}.tag.ch-remove,.tag.ch-conf{border-color:var(--bad);color:var(--bad)}
+.chg.ch-remove .ba>div:first-child{background:color-mix(in srgb,var(--bad) 10%,transparent);border-radius:6px;padding:4px}
+.chg.ch-add .ba>div:last-child{background:color-mix(in srgb,var(--ok) 10%,transparent);border-radius:6px;padding:4px}
+.cols3.ba{grid-template-columns:1fr 1fr}.cols3.ba .cols3{grid-template-columns:1fr}.cols3.ba .cl{display:block}
+dl.kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:0}dl.kv dt{color:var(--mut);font-size:13px}dl.kv dd{margin:0}
+@media (max-width:640px){.cols3.ba{grid-template-columns:1fr}dl.kv{grid-template-columns:1fr}}

@@ -18,7 +18,11 @@ npm run serve        # http://127.0.0.1:5173/web/ を開く(demoモード: 架�
 | `npm test` | 単体/結合テスト(メモリストア) |
 | `npm run test:emu` | 同じテストをFirestoreエミュレータ(`demo-ff14rp`)で実行。要Java。復元検証CLIの結合テストを含む |
 | `npm run test:e2e` | ブラウザ(Chromium)E2E。デモモード |
+| `npm run test:isolated` | 保存版の店舗アプリを実ブラウザで操作する隔離E2E(要 `FF14RP_DINER_SRC` `FF14RP_TOKO_SRC`) |
 | `npm run migrate:demo` | 架空データで移行ドライラン(件数レポートのみ) |
+
+## ChatGPT連携(イベント・セレモニー)
+企画の相談はChatGPTで、保存・閲覧・編集は総合DBで。仕様書をコピー→ChatGPTで作成→JSONを取り込み(差分確認つき)。細かな修正はアプリ上で直接編集。詳細: `docs/CHATGPT_EXCHANGE.md`。
 
 ## 構成
 - `core/` 純ロジック(ブラウザ/Node共用): 移行計画、人物操作+変更履歴/undo、集計、セレモニー、マクロ、タイムライン、イベント、ドリフト検出
